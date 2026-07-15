@@ -1,4 +1,4 @@
-"""get_addresses / create_address / delete_address wrappers (CUE-10).
+"""Instamart tool wrappers: addresses (CUE-10), search_products (CUE-11).
 
 Every call resolves the user's live Swiggy access token first (R2.5): no
 usable token means "not linked or reconnect needed", which is routed through
@@ -16,12 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.instamart import client
 from app.instamart.constants import (
+    DEFAULT_SEARCH_OFFSET,
     TOOL_CREATE_ADDRESS,
     TOOL_DELETE_ADDRESS,
     TOOL_GET_ADDRESSES,
+    TOOL_SEARCH_PRODUCTS,
 )
 from app.instamart.exceptions import InstamartAuthError
-from app.instamart.schemas import Address, CreateAddressRequest
+from app.instamart.schemas import Address, CreateAddressRequest, Product
 from app.providers import service as provider_service
 
 
@@ -69,3 +71,30 @@ async def delete_address(session: AsyncSession, user_id: int, address_id: str) -
     await _call_authenticated(
         session, user_id, TOOL_DELETE_ADDRESS, {"addressId": address_id}
     )
+
+
+async def search_products(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    address_id: str,
+    query: str,
+    offset: int = DEFAULT_SEARCH_OFFSET,
+) -> list[Product]:
+    """Search Instamart products scoped to `address_id` (R4.1).
+
+    Search is address-scoped: results (and stock) depend on the selected
+    delivery address. No results is not an error - it returns an empty list
+    so the substitution path (R4.4) can treat "nothing found" the same way
+    it treats "found, but the preferred item was out of stock".
+    """
+    data = await _call_authenticated(
+        session,
+        user_id,
+        TOOL_SEARCH_PRODUCTS,
+        {"addressId": address_id, "query": query, "offset": offset},
+    )
+    # The envelope key holding the list isn't pinned by Swiggy's docs; accept
+    # either a bare list or one nested under "products".
+    raw_products = data.get("products", []) if isinstance(data, dict) else data or []
+    return [Product.model_validate(item) for item in raw_products]

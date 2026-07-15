@@ -11,6 +11,9 @@ INSTAMART_MCP_ENDPOINT = "https://mcp.swiggy.com/im"
 TOOL_GET_ADDRESSES = "get_addresses"
 TOOL_CREATE_ADDRESS = "create_address"
 TOOL_DELETE_ADDRESS = "delete_address"
+TOOL_SEARCH_PRODUCTS = "search_products"
+
+DEFAULT_SEARCH_OFFSET = 0
 
 REQUEST_TIMEOUT_SECONDS = 10.0
 
