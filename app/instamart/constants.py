@@ -12,6 +12,8 @@ TOOL_GET_ADDRESSES = "get_addresses"
 TOOL_CREATE_ADDRESS = "create_address"
 TOOL_DELETE_ADDRESS = "delete_address"
 TOOL_SEARCH_PRODUCTS = "search_products"
+TOOL_UPDATE_CART = "update_cart"
+TOOL_GET_CART = "get_cart"
 
 DEFAULT_SEARCH_OFFSET = 0
 

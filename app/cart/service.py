@@ -1,8 +1,7 @@
-"""Variant selection + quantity math (R4.2/R4.3/R4.5, CUE-15 - core IP).
+"""Variant selection (CUE-15) and cart composition (CUE-16).
 
-Given `search_products` candidates for one ingredient, picks the single best
-purchasable variant and maps the recipe's needed quantity to a purchasable
-pack count. Ranking order, highest priority first:
+`select_variant` picks the single best purchasable variant for one
+ingredient from `search_products` candidates, ranked highest priority first:
 
   1. In stock - a hard filter; an out-of-stock variant is never selected.
   2. Pack-size sanity: a variant whose pack size parses and needs the least
@@ -14,18 +13,30 @@ pack count. Ranking order, highest priority first:
   4. Price, ascending, as the final tiebreak.
 
 No candidates in stock at all resolves to `unavailable`, never a raised
-exception - an unresolved ingredient is a normal outcome the caller (cart
-composition, CUE-16) must handle, not an error.
+exception - an unresolved ingredient is a normal outcome `compose_cart` must
+handle, not an error.
+
+`compose_cart` takes the selections for every ingredient in a session and
+writes them as a single `CartPlan` (R5.1), enforcing the Rs 99 minimum
+(R5.4) and the address-bound-plan invariant (R3.3).
 """
 
 from __future__ import annotations
 
 import math
+import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 
-from app.cart.schemas import Ingredient, MatchStatus, SelectedVariant
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.cart.constants import MINIMUM_ORDER_VALUE
+from app.cart.schemas import ComposeCartResult, Ingredient, MatchStatus, SelectedVariant
 from app.cart.units import normalize_quantity, parse_pack_size
-from app.instamart.schemas import Product, ProductVariant
+from app.instamart import service as instamart_service
+from app.instamart.schemas import CartItemInput, Product, ProductVariant
+from app.models.cart import CartPlan, CartPlanItem
 
 _NO_IN_STOCK_VARIANT_REASON = "No in-stock variant found for this ingredient."
 _INFINITY = Decimal("Infinity")
@@ -147,3 +158,102 @@ def _rank_key(
     preference_rank = 0 if _is_preferred_brand(ingredient, product) else 1
     price = variant.price if variant.price is not None else _INFINITY
     return (sanity_rank, overage_ratio, preference_rank, price)
+
+
+async def compose_cart(
+    session: AsyncSession,
+    user_id: int,
+    chat_session_id: uuid.UUID,
+    address_id: str,
+    selected_variants: list[SelectedVariant],
+) -> ComposeCartResult:
+    """Compose the full cart for `chat_session_id` in one write (R5.1).
+
+    Always supersedes any existing live plan for this session first (R3.3):
+    a recompose - whether from a fresh selection or a switched delivery
+    address - replaces the plan; `CartPlan` is append-only, never mutated in
+    place, so the superseded history stays debuggable. Because the caller
+    always passes the full, freshly-sourced set of `selected_variants`, an
+    address switch can never carry stale items forward - there is no
+    "reuse previous items" path.
+
+    Below the Rs 99 minimum (R5.4), the plan is still recorded, but
+    `update_cart` is never called: there's nothing checkout-able yet, and
+    the result's `shortfall` guides the user to add more before recomposing.
+    """
+    await _supersede_live_plan(session, chat_session_id)
+
+    plan = CartPlan(session_id=chat_session_id, address_id=address_id)
+    session.add(plan)
+    await session.flush()
+
+    for variant in selected_variants:
+        session.add(
+            CartPlanItem(
+                plan_id=plan.id,
+                ingredient_name=variant.ingredient_name,
+                ingredient_qty=variant.ingredient_qty,
+                ingredient_unit=variant.ingredient_unit,
+                match_status=variant.match_status.value,
+                spin_id=variant.spin_id,
+                product_name=variant.product_name,
+                pack_size=variant.pack_size,
+                unit_price=variant.unit_price,
+                quantity=variant.quantity,
+                selection_reason=variant.selection_reason,
+            )
+        )
+    await session.commit()
+
+    purchasable: list[tuple[str, int, Decimal]] = []
+    for variant in selected_variants:
+        if (
+            variant.spin_id is None
+            or variant.quantity is None
+            or variant.unit_price is None
+        ):
+            continue
+        purchasable.append((variant.spin_id, variant.quantity, variant.unit_price))
+
+    subtotal = sum(
+        (unit_price * quantity for _, quantity, unit_price in purchasable),
+        start=Decimal(0),
+    )
+    if subtotal < MINIMUM_ORDER_VALUE:
+        return ComposeCartResult(
+            plan_id=plan.id,
+            subtotal=subtotal,
+            minimum_order_value=MINIMUM_ORDER_VALUE,
+            below_minimum=True,
+            shortfall=MINIMUM_ORDER_VALUE - subtotal,
+        )
+
+    items = [
+        CartItemInput(spin_id=spin_id, quantity=quantity)
+        for spin_id, quantity, _ in purchasable
+    ]
+    await instamart_service.update_cart(
+        session, user_id, address_id=address_id, items=items
+    )
+    cart = await instamart_service.get_cart(session, user_id)
+
+    return ComposeCartResult(
+        plan_id=plan.id,
+        subtotal=subtotal,
+        minimum_order_value=MINIMUM_ORDER_VALUE,
+        below_minimum=False,
+        shortfall=Decimal(0),
+        cart=cart,
+    )
+
+
+async def _supersede_live_plan(
+    session: AsyncSession, chat_session_id: uuid.UUID
+) -> None:
+    """Mark the session's current live plan (if any) superseded (R3.3)."""
+    stmt = (
+        update(CartPlan)
+        .where(CartPlan.session_id == chat_session_id, CartPlan.superseded_at.is_(None))
+        .values(superseded_at=datetime.now(UTC))
+    )
+    await session.execute(stmt)
