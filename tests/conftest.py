@@ -12,8 +12,14 @@ from __future__ import annotations
 
 import os
 
+from cryptography.fernet import Fernet
+
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://test:test@localhost/test"
 os.environ["AUTH_FIREBASE_PROJECT_ID"] = "cue-test"
+os.environ["SWIGGY_CLIENT_ID"] = "test-client-id"
+os.environ["SWIGGY_REDIRECT_URI"] = "https://api.cue.test/providers/swiggy/callback"
+os.environ["SWIGGY_APP_CALLBACK_DEEP_LINK"] = "cue://swiggy-link"
+os.environ["SWIGGY_TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
 import subprocess
 from collections.abc import AsyncGenerator, Generator
