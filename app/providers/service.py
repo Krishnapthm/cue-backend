@@ -1,4 +1,7 @@
-"""Swiggy OAuth 2.1 + PKCE flow and token lifecycle (R2.1/R2.5, CUE-7/8)."""
+"""Swiggy OAuth 2.1 + PKCE flow, token lifecycle, status/unlink.
+
+R2.1/R2.5/R9.2/R9.3, CUE-7/8/9.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +14,7 @@ from urllib.parse import urlencode
 
 import httpx
 from cryptography.fernet import Fernet
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,7 +36,7 @@ from app.providers.exceptions import (
     ProviderNotConfiguredError,
     SwiggyTokenExchangeError,
 )
-from app.providers.schemas import AuthorizeResponse
+from app.providers.schemas import AuthorizeResponse, ProviderStatus
 
 logger = logging.getLogger(__name__)
 
@@ -251,3 +254,34 @@ async def record_provider_response(
     """
     if status_code in RECOVERABLE_PROVIDER_STATUS_CODES:
         await mark_link_expired(session, user_id, provider)
+
+
+async def get_link_status(
+    session: AsyncSession, user_id: int, provider: str = PROVIDER
+) -> ProviderStatus:
+    """Resolve the Cue user's Swiggy link to Connected / Reconnect needed /
+    Not connected (R9.2).
+
+    Reconnect needed covers both the recovery ladder's `expired` status and a
+    token that has simply outlived its 5-day clock but hasn't been touched
+    yet - either way the only path forward is OAuth authorize (R2.1).
+    """
+    link = await get_link(session, user_id, provider)
+    if link is None:
+        return ProviderStatus.NOT_CONNECTED
+    if link.status == "expired" or link.token_expires_at <= datetime.now(UTC):
+        return ProviderStatus.RECONNECT_NEEDED
+    return ProviderStatus.CONNECTED
+
+
+async def unlink(session: AsyncSession, user_id: int, provider: str = PROVIDER) -> None:
+    """Revoke the provider link only; cart and action queue are untouched (R9.3).
+
+    A no-op if no link exists, so unlinking an already-unlinked user is not
+    an error.
+    """
+    stmt = delete(ProviderLink).where(
+        ProviderLink.user_id == user_id, ProviderLink.provider == provider
+    )
+    await session.execute(stmt)
+    await session.commit()

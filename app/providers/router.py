@@ -12,7 +12,7 @@ from app.providers.exceptions import (
     ProviderNotConfiguredError,
     SwiggyTokenExchangeError,
 )
-from app.providers.schemas import AuthorizeResponse
+from app.providers.schemas import AuthorizeResponse, StatusResponse
 
 router = APIRouter(prefix="/providers/swiggy", tags=["providers"])
 
@@ -66,3 +66,25 @@ async def callback(
         return RedirectResponse(f"{deep_link}?swiggy_link=error")
 
     return RedirectResponse(f"{deep_link}?swiggy_link=success")
+
+
+@router.get(
+    "/status",
+    response_model=StatusResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Current Swiggy link state for the Cue user",
+)
+async def get_status(user: CurrentUser, session: DbSession) -> StatusResponse:
+    """Read by Settings (R9.2) and the chat point-of-value prompt (R2.2)."""
+    link_status = await service.get_link_status(session, user.id)
+    return StatusResponse(status=link_status)
+
+
+@router.delete(
+    "",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Unlink Swiggy",
+)
+async def unlink(user: CurrentUser, session: DbSession) -> None:
+    """Revoke the Swiggy link only; cart and action queue are untouched (R9.3)."""
+    await service.unlink(session, user.id)
