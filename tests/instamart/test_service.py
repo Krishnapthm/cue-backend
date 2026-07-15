@@ -10,7 +10,7 @@ from app.instamart.exceptions import InstamartAuthError
 from app.instamart.schemas import AddressCategory, CreateAddressRequest
 from app.models.user import User
 from app.providers import service as provider_service
-from tests.instamart.conftest import InstamartToolCallStub
+from tests.conftest import InstamartToolCallStub
 
 RAW_ADDRESS = {
     "addressId": "addr-1",

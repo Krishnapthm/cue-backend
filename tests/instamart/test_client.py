@@ -9,7 +9,7 @@ from app.instamart.exceptions import (
     InstamartDomainError,
     InstamartTransportError,
 )
-from tests.instamart.conftest import InstamartToolCallStub
+from tests.conftest import InstamartToolCallStub
 
 
 async def test_call_tool_returns_the_data_payload_on_success(
