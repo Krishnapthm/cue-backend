@@ -10,6 +10,7 @@ from app.config import Environment, settings
 from app.database import engine
 from app.exceptions import register_exception_handlers
 from app.health.router import router as health_router
+from app.providers.router import router as providers_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,3 +40,4 @@ app = FastAPI(
 
 register_exception_handlers(app)
 app.include_router(health_router)
+app.include_router(providers_router)
