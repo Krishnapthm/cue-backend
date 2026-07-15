@@ -9,18 +9,20 @@ dependencies = [
     "asyncpg>=0.31.0",
     "fastapi>=0.139.0",
     "greenlet>=3.5.3",
+    "httpx>=0.28.1",
     "pydantic-settings>=2.14.2",
+    "pyjwt[crypto]>=2.10.1",
     "sqlalchemy[asyncio]>=2.0",
     "uvicorn[standard]>=0.51.0",
 ]
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "mypy>=2.2.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.21",
+    "testcontainers[postgres]>=4.14.2",
 ]
 
 [tool.ruff]
@@ -52,6 +54,11 @@ plugins = ["pydantic.mypy"]
 module = "migrations.*"
 ignore_errors = true
 
+[[tool.mypy.overrides]]
+module = "testcontainers.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
