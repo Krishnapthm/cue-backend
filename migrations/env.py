@@ -24,6 +24,24 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+# LangGraph's checkpointer owns these tables via PostgresSaver.setup() and
+# version-manages them itself. Alembic must never see them, or the first
+# autogenerate would emit DROP TABLE checkpoints and friends.
+LANGGRAPH_TABLES = {
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "checkpoint_migrations",
+}
+
+
+def include_name(
+    name: str | None,
+    type_: str,
+    parent_names: dict[str, str | None],
+) -> bool:
+    return not (type_ == "table" and name in LANGGRAPH_TABLES)
+
 
 def run_migrations_offline() -> None:
     """Emit migration SQL to stdout without connecting to a database."""
@@ -34,6 +52,8 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         compare_server_default=True,
+        include_name=include_name,
+        include_schemas=False,
     )
 
     with context.begin_transaction():
@@ -47,6 +67,8 @@ def do_run_migrations(connection: Connection) -> None:
         target_metadata=target_metadata,
         compare_type=True,
         compare_server_default=True,
+        include_name=include_name,
+        include_schemas=False,
     )
 
     with context.begin_transaction():
