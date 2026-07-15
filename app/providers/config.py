@@ -15,15 +15,18 @@ class ProviderSettings(BaseSettings):
         extra="ignore",
     )
 
-    CLIENT_ID: str
+    # Optional: unset in local dev, where the Swiggy link flow is never
+    # exercised. Routes/services that need one of these validate it lazily
+    # and raise ProviderNotConfiguredError rather than failing app startup.
+    CLIENT_ID: str | None = None
     # Our own callback URL, registered with Swiggy; must match exactly on
     # both the authorize and token-exchange calls.
-    REDIRECT_URI: str
+    REDIRECT_URI: str | None = None
     # Fixed app deep link the callback redirects to once linking finishes,
     # success or failure, so the client can resume the pending action (R2.4).
-    APP_CALLBACK_DEEP_LINK: str
+    APP_CALLBACK_DEEP_LINK: str | None = None
     # Fernet key encrypting access_token_ct / code_verifier_ct at rest.
-    TOKEN_ENCRYPTION_KEY: str
+    TOKEN_ENCRYPTION_KEY: str | None = None
 
 
 @lru_cache

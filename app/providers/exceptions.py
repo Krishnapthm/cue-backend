@@ -17,3 +17,10 @@ class SwiggyTokenExchangeError(AppError):
 
     status_code = status.HTTP_502_BAD_GATEWAY
     detail = "Failed to exchange authorization code with Swiggy."
+
+
+class ProviderNotConfiguredError(AppError):
+    """The Swiggy OAuth client is not configured on this deployment."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    detail = "Swiggy integration is not configured on this server."

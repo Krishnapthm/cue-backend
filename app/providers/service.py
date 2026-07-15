@@ -26,22 +26,31 @@ from app.providers.constants import (
     SWIGGY_TOKEN_URL,
     TOKEN_ENCRYPTION_KEY_VERSION,
 )
-from app.providers.exceptions import InvalidOAuthStateError, SwiggyTokenExchangeError
+from app.providers.exceptions import (
+    InvalidOAuthStateError,
+    ProviderNotConfiguredError,
+    SwiggyTokenExchangeError,
+)
 from app.providers.schemas import AuthorizeResponse
 
 logger = logging.getLogger(__name__)
 
-_fernet = Fernet(provider_settings.TOKEN_ENCRYPTION_KEY)
+
+def _get_fernet() -> Fernet:
+    """Build the cipher from the configured key, or raise if unconfigured."""
+    if provider_settings.TOKEN_ENCRYPTION_KEY is None:
+        raise ProviderNotConfiguredError
+    return Fernet(provider_settings.TOKEN_ENCRYPTION_KEY)
 
 
 def _encrypt(plaintext: str) -> bytes:
     """Encrypt a secret for storage in an `*_ct` column."""
-    return _fernet.encrypt(plaintext.encode())
+    return _get_fernet().encrypt(plaintext.encode())
 
 
 def _decrypt(ciphertext: bytes) -> str:
     """Decrypt a secret previously stored by `_encrypt`."""
-    return _fernet.decrypt(ciphertext).decode()
+    return _get_fernet().decrypt(ciphertext).decode()
 
 
 def _generate_pkce_pair() -> tuple[str, str]:
@@ -61,7 +70,16 @@ async def create_authorization(session: AsyncSession, user: User) -> AuthorizeRe
 
     Returns:
         The Swiggy consent URL the client should open.
+
+    Raises:
+        ProviderNotConfiguredError: If Swiggy OAuth is not configured on
+            this deployment (e.g. local dev without a registered app).
     """
+    client_id = provider_settings.CLIENT_ID
+    redirect_uri = provider_settings.REDIRECT_URI
+    if client_id is None or redirect_uri is None:
+        raise ProviderNotConfiguredError
+
     verifier, challenge = _generate_pkce_pair()
     state = secrets.token_urlsafe(32)
     now = datetime.now(UTC)
@@ -73,7 +91,7 @@ async def create_authorization(session: AsyncSession, user: User) -> AuthorizeRe
             provider=PROVIDER,
             code_verifier_ct=_encrypt(verifier),
             key_version=TOKEN_ENCRYPTION_KEY_VERSION,
-            redirect_uri=provider_settings.REDIRECT_URI,
+            redirect_uri=redirect_uri,
             expires_at=now + timedelta(seconds=OAUTH_TRANSACTION_TTL_SECONDS),
         )
     )
@@ -82,8 +100,8 @@ async def create_authorization(session: AsyncSession, user: User) -> AuthorizeRe
     query = urlencode(
         {
             "response_type": "code",
-            "client_id": provider_settings.CLIENT_ID,
-            "redirect_uri": provider_settings.REDIRECT_URI,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
             "code_challenge": challenge,
             "code_challenge_method": CODE_CHALLENGE_METHOD,
             "state": state,
