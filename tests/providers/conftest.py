@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.provider import ProviderLink
 from app.models.user import User
 from app.providers import service
+from app.providers.constants import PROVIDER
 
 DEFAULT_TOKEN_PAYLOAD = {
     "access_token": "at_test_token",
@@ -29,6 +32,23 @@ async def user(db_session: AsyncSession) -> User:
     await db_session.commit()
     await db_session.refresh(new_user)
     return new_user
+
+
+@pytest_asyncio.fixture
+async def active_link(db_session: AsyncSession, user: User) -> ProviderLink:
+    """An already-linked, active Swiggy provider link for `user`."""
+    link = ProviderLink(
+        user_id=user.id,
+        provider=PROVIDER,
+        access_token_ct=b"ciphertext",
+        token_expires_at=datetime.now(UTC) + timedelta(days=5),
+        scope="mcp:tools",
+        status="active",
+    )
+    db_session.add(link)
+    await db_session.commit()
+    await db_session.refresh(link)
+    return link
 
 
 @pytest.fixture
