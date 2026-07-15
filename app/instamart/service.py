@@ -1,4 +1,5 @@
-"""Instamart tool wrappers: addresses (CUE-10), search_products (CUE-11).
+"""Instamart tool wrappers: addresses (CUE-10), search_products (CUE-11),
+cart (CUE-16).
 
 Every call resolves the user's live Swiggy access token first (R2.5): no
 usable token means "not linked or reconnect needed", which is routed through
@@ -20,10 +21,18 @@ from app.instamart.constants import (
     TOOL_CREATE_ADDRESS,
     TOOL_DELETE_ADDRESS,
     TOOL_GET_ADDRESSES,
+    TOOL_GET_CART,
     TOOL_SEARCH_PRODUCTS,
+    TOOL_UPDATE_CART,
 )
 from app.instamart.exceptions import InstamartAuthError
-from app.instamart.schemas import Address, CreateAddressRequest, Product
+from app.instamart.schemas import (
+    Address,
+    Cart,
+    CartItemInput,
+    CreateAddressRequest,
+    Product,
+)
 from app.providers import service as provider_service
 
 
@@ -98,3 +107,34 @@ async def search_products(
     # either a bare list or one nested under "products".
     raw_products = data.get("products", []) if isinstance(data, dict) else data or []
     return [Product.model_validate(item) for item in raw_products]
+
+
+async def update_cart(
+    session: AsyncSession, user_id: int, *, address_id: str, items: list[CartItemInput]
+) -> Cart:
+    """Replace the entire Swiggy cart in one write (R5.1).
+
+    `items` is always the full composed cart, never a delta: Swiggy's
+    `update_cart` replaces whatever cart exists, so there is no partial or
+    incremental variant of this call.
+    """
+    data = await _call_authenticated(
+        session,
+        user_id,
+        TOOL_UPDATE_CART,
+        {
+            "selectedAddressId": address_id,
+            "items": [item.model_dump(by_alias=True) for item in items],
+        },
+    )
+    # The envelope isn't pinned by Swiggy's docs; accept the cart nested
+    # under "cart" or returned as the data payload directly.
+    raw_cart = data.get("cart", data) if isinstance(data, dict) else data
+    return Cart.model_validate(raw_cart or {})
+
+
+async def get_cart(session: AsyncSession, user_id: int) -> Cart:
+    """Read the server cart - the source of truth before confirm and checkout (R5.2)."""
+    data = await _call_authenticated(session, user_id, TOOL_GET_CART, {})
+    raw_cart = data.get("cart", data) if isinstance(data, dict) else data
+    return Cart.model_validate(raw_cart or {})
