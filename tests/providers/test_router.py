@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
 from app.main import app
+from app.models.provider import ProviderLink
 from app.models.user import User
 
 
@@ -99,3 +100,64 @@ async def test_callback_redirects_to_the_app_when_swiggy_reports_an_error(
 
     assert response.status_code == 307
     assert "swiggy_link=error" in response.headers["location"]
+
+
+async def test_status_requires_authentication(client: httpx.AsyncClient) -> None:
+    response = await client.get("/providers/swiggy/status")
+
+    assert response.status_code == 401
+
+
+async def test_status_is_not_connected_when_never_linked(
+    authed_client: httpx.AsyncClient,
+) -> None:
+    response = await authed_client.get("/providers/swiggy/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "not_connected"}
+
+
+async def test_status_is_connected_after_a_successful_link(
+    authed_client: httpx.AsyncClient,
+    mock_swiggy_token_endpoint: Callable[..., None],
+) -> None:
+    authorize_response = await authed_client.post("/providers/swiggy/authorize")
+    state = parse_qs(urlparse(authorize_response.json()["authorize_url"]).query)[
+        "state"
+    ][0]
+    await authed_client.get(
+        "/providers/swiggy/callback", params={"code": "auth-code", "state": state}
+    )
+
+    response = await authed_client.get("/providers/swiggy/status")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "connected"}
+
+
+async def test_unlink_requires_authentication(client: httpx.AsyncClient) -> None:
+    response = await client.delete("/providers/swiggy")
+
+    assert response.status_code == 401
+
+
+async def test_unlink_removes_the_link_and_status_reads_not_connected(
+    authed_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    user: User,
+    active_link: ProviderLink,
+) -> None:
+    response = await authed_client.delete("/providers/swiggy")
+
+    assert response.status_code == 204
+
+    status_response = await authed_client.get("/providers/swiggy/status")
+    assert status_response.json() == {"status": "not_connected"}
+
+
+async def test_unlink_is_idempotent_when_already_not_connected(
+    authed_client: httpx.AsyncClient,
+) -> None:
+    response = await authed_client.delete("/providers/swiggy")
+
+    assert response.status_code == 204

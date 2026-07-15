@@ -13,6 +13,7 @@ from app.models.user import User
 from app.providers import service
 from app.providers.constants import PROVIDER
 from app.providers.exceptions import InvalidOAuthStateError, SwiggyTokenExchangeError
+from app.providers.schemas import ProviderStatus
 
 
 async def test_create_authorization_returns_a_swiggy_consent_url_with_pkce_params(
@@ -212,3 +213,68 @@ async def test_record_provider_response_leaves_link_active_on_other_statuses(
     link = await service.get_link(db_session, user.id)
     assert link is not None
     assert link.status == "active"
+
+
+async def test_get_link_status_is_not_connected_when_never_linked(
+    db_session: AsyncSession, user: User
+) -> None:
+    link_status = await service.get_link_status(db_session, user.id)
+
+    assert link_status == ProviderStatus.NOT_CONNECTED
+
+
+async def test_get_link_status_is_connected_for_an_active_unexpired_link(
+    db_session: AsyncSession, user: User, active_link: ProviderLink
+) -> None:
+    link_status = await service.get_link_status(db_session, user.id)
+
+    assert link_status == ProviderStatus.CONNECTED
+
+
+async def test_get_link_status_is_reconnect_needed_after_recovery_ladder_expiry(
+    db_session: AsyncSession, user: User, active_link: ProviderLink
+) -> None:
+    await service.mark_link_expired(db_session, user.id)
+
+    link_status = await service.get_link_status(db_session, user.id)
+
+    assert link_status == ProviderStatus.RECONNECT_NEEDED
+
+
+async def test_get_link_status_is_reconnect_needed_once_the_token_clock_expires(
+    db_session: AsyncSession, user: User
+) -> None:
+    db_session.add(
+        ProviderLink(
+            user_id=user.id,
+            provider=PROVIDER,
+            access_token_ct=b"ciphertext",
+            token_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            scope="mcp:tools",
+            status="active",
+        )
+    )
+    await db_session.commit()
+
+    link_status = await service.get_link_status(db_session, user.id)
+
+    assert link_status == ProviderStatus.RECONNECT_NEEDED
+
+
+async def test_unlink_removes_the_link_row(
+    db_session: AsyncSession, user: User, active_link: ProviderLink
+) -> None:
+    await service.unlink(db_session, user.id)
+
+    link = await service.get_link(db_session, user.id)
+    assert link is None
+
+
+async def test_unlink_is_a_noop_when_not_linked(
+    db_session: AsyncSession, user: User
+) -> None:
+    # Must not raise for a user who was never linked, or already unlinked.
+    await service.unlink(db_session, user.id)
+
+    link = await service.get_link(db_session, user.id)
+    assert link is None
