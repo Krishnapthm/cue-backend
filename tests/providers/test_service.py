@@ -144,3 +144,71 @@ async def test_complete_authorization_upserts_on_relink_after_expiry(
     links = result.scalars().all()
     assert len(links) == 1
     assert links[0].status == "active"
+
+
+async def test_get_link_returns_none_when_not_linked(
+    db_session: AsyncSession, user: User
+) -> None:
+    link = await service.get_link(db_session, user.id)
+
+    assert link is None
+
+
+async def test_get_link_returns_the_row_when_linked(
+    db_session: AsyncSession, user: User, active_link: ProviderLink
+) -> None:
+    link = await service.get_link(db_session, user.id)
+
+    assert link is not None
+    assert link.id == active_link.id
+
+
+async def test_mark_link_expired_flips_status_without_touching_other_columns(
+    db_session: AsyncSession, user: User, active_link: ProviderLink
+) -> None:
+    await service.mark_link_expired(db_session, user.id)
+
+    stmt = select(ProviderLink).where(ProviderLink.id == active_link.id)
+    result = await db_session.execute(stmt)
+    link = result.scalar_one()
+    assert link.status == "expired"
+    assert link.access_token_ct == active_link.access_token_ct
+    assert link.token_expires_at == active_link.token_expires_at
+
+
+async def test_mark_link_expired_is_a_noop_when_no_link_exists(
+    db_session: AsyncSession, user: User
+) -> None:
+    # No provider_link row for this user; must not raise.
+    await service.mark_link_expired(db_session, user.id)
+
+    link = await service.get_link(db_session, user.id)
+    assert link is None
+
+
+@pytest.mark.parametrize("status_code", [401, 419])
+async def test_record_provider_response_marks_expired_on_recoverable_status(
+    db_session: AsyncSession,
+    user: User,
+    active_link: ProviderLink,
+    status_code: int,
+) -> None:
+    await service.record_provider_response(db_session, user.id, status_code)
+
+    link = await service.get_link(db_session, user.id)
+    assert link is not None
+    assert link.status == "expired"
+
+
+@pytest.mark.parametrize("status_code", [200, 403, 500])
+async def test_record_provider_response_leaves_link_active_on_other_statuses(
+    db_session: AsyncSession,
+    user: User,
+    active_link: ProviderLink,
+    status_code: int,
+) -> None:
+    await service.record_provider_response(db_session, user.id, status_code)
+
+    link = await service.get_link(db_session, user.id)
+    assert link is not None
+    assert link.status == "active"

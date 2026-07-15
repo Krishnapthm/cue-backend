@@ -1,4 +1,4 @@
-"""Swiggy OAuth 2.1 + PKCE authorize/callback flow (R2.1/R2.5, CUE-7)."""
+"""Swiggy OAuth 2.1 + PKCE flow and token lifecycle (R2.1/R2.5, CUE-7/8)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 
 import httpx
 from cryptography.fernet import Fernet
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,7 @@ from app.providers.constants import (
     CODE_CHALLENGE_METHOD,
     OAUTH_TRANSACTION_TTL_SECONDS,
     PROVIDER,
+    RECOVERABLE_PROVIDER_STATUS_CODES,
     SWIGGY_AUTHORIZE_URL,
     SWIGGY_SCOPE,
     SWIGGY_TOKEN_URL,
@@ -199,3 +201,53 @@ async def complete_authorization(
     await session.execute(upsert_stmt)
     txn.consumed_at = now
     await session.commit()
+
+
+async def get_link(
+    session: AsyncSession, user_id: int, provider: str = PROVIDER
+) -> ProviderLink | None:
+    """Return the Cue user's provider link row, if one exists."""
+    stmt = select(ProviderLink).where(
+        ProviderLink.user_id == user_id, ProviderLink.provider == provider
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def mark_link_expired(
+    session: AsyncSession, user_id: int, provider: str = PROVIDER
+) -> None:
+    """Flip a provider link to `expired` without touching anything else (R2.5).
+
+    Called when Swiggy rejects the access token mid-call (401/419). There is
+    no refresh grant in Swiggy MCP v1.0: recovery is always a fresh OAuth
+    authorize (R2.1), never a silent retry here. A no-op if the link is
+    already gone (e.g. the user unlinked concurrently).
+    """
+    stmt = (
+        update(ProviderLink)
+        .where(ProviderLink.user_id == user_id, ProviderLink.provider == provider)
+        .values(status="expired")
+    )
+    await session.execute(stmt)
+    await session.commit()
+
+
+async def record_provider_response(
+    session: AsyncSession, user_id: int, status_code: int, provider: str = PROVIDER
+) -> None:
+    """Apply the recovery ladder to a Swiggy MCP response (R2.5).
+
+    Every call site that hits the Swiggy MCP with a user's linked token
+    should route its response status through this after the call. A 401
+    (expired/invalid token) or 419 (revoked session) marks the link expired;
+    any other status is left alone.
+
+    Args:
+        session: An active database session.
+        user_id: The Cue user whose link issued the call.
+        status_code: The HTTP status Swiggy returned for the call.
+        provider: The linked provider; always "swiggy" today.
+    """
+    if status_code in RECOVERABLE_PROVIDER_STATUS_CODES:
+        await mark_link_expired(session, user_id, provider)
