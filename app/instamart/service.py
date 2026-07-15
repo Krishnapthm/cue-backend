@@ -1,5 +1,5 @@
 """Instamart tool wrappers: addresses (CUE-10), search_products (CUE-11),
-cart (CUE-16).
+cart (CUE-16), checkout (CUE-19).
 
 Every call resolves the user's live Swiggy access token first (R2.5): no
 usable token means "not linked or reconnect needed", which is routed through
@@ -17,11 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.instamart import client
 from app.instamart.constants import (
+    DEFAULT_GET_ORDERS_COUNT,
     DEFAULT_SEARCH_OFFSET,
+    TOOL_CHECKOUT,
     TOOL_CREATE_ADDRESS,
     TOOL_DELETE_ADDRESS,
     TOOL_GET_ADDRESSES,
     TOOL_GET_CART,
+    TOOL_GET_ORDERS,
     TOOL_SEARCH_PRODUCTS,
     TOOL_UPDATE_CART,
 )
@@ -30,7 +33,9 @@ from app.instamart.schemas import (
     Address,
     Cart,
     CartItemInput,
+    CheckoutResult,
     CreateAddressRequest,
+    OrderSummary,
     Product,
 )
 from app.providers import service as provider_service
@@ -138,3 +143,33 @@ async def get_cart(session: AsyncSession, user_id: int) -> Cart:
     data = await _call_authenticated(session, user_id, TOOL_GET_CART, {})
     raw_cart = data.get("cart", data) if isinstance(data, dict) else data
     return Cart.model_validate(raw_cart or {})
+
+
+async def checkout(
+    session: AsyncSession, user_id: int, *, address_id: str
+) -> CheckoutResult:
+    """Place a COD order against the current server cart (R6.1).
+
+    Non-idempotent: this creates and confirms a real order in one operation.
+    A transport-level failure here (`InstamartTransportError`) means the
+    outcome is genuinely unknown, not "failed" - callers must reconcile via
+    `get_orders` (R6.3) before ever calling this again, never blindly retry.
+    """
+    data = await _call_authenticated(
+        session, user_id, TOOL_CHECKOUT, {"addressId": address_id}
+    )
+    raw_order = data.get("order", data) if isinstance(data, dict) else data
+    return CheckoutResult.model_validate(raw_order or {})
+
+
+async def get_orders(
+    session: AsyncSession, user_id: int, *, count: int = DEFAULT_GET_ORDERS_COUNT
+) -> list[OrderSummary]:
+    """List the user's recent Instamart orders (R6.3 checkout reconciliation)."""
+    data = await _call_authenticated(
+        session, user_id, TOOL_GET_ORDERS, {"count": count}
+    )
+    # The envelope key holding the list isn't pinned by Swiggy's docs; accept
+    # either a bare list or one nested under "orders".
+    raw_orders = data.get("orders", []) if isinstance(data, dict) else data or []
+    return [OrderSummary.model_validate(item) for item in raw_orders]

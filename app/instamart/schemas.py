@@ -142,3 +142,33 @@ class Cart(BaseModel):
     available_payment_methods: list[str] = Field(
         default_factory=list, alias="availablePaymentMethods"
     )
+
+
+class CheckoutResult(BaseModel):
+    """Result of a successful `checkout` call (R6.1).
+
+    Swiggy's docs confirm `checkout` "creates order and confirms payment in
+    a single operation" but don't spell out response field names; `order_id`
+    parses defensively from the most likely key and may be absent, which
+    callers must treat as an unconfirmed outcome, not a placed order.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    order_id: str | None = Field(default=None, alias="orderId")
+    total: Decimal | None = None
+
+
+class OrderSummary(BaseModel):
+    """One entry from get_orders.
+
+    Used to check whether a checkout landed after a transport failure
+    (R6.3) - never as an order-history mirror; Order History reads
+    get_orders directly.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    order_id: str = Field(alias="orderId")
+    status: str | None = None
+    total: Decimal | None = None
