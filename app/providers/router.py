@@ -7,7 +7,11 @@ from app.auth.dependencies import CurrentUser
 from app.database import DbSession
 from app.providers import service
 from app.providers.config import provider_settings
-from app.providers.exceptions import InvalidOAuthStateError, SwiggyTokenExchangeError
+from app.providers.exceptions import (
+    InvalidOAuthStateError,
+    ProviderNotConfiguredError,
+    SwiggyTokenExchangeError,
+)
 from app.providers.schemas import AuthorizeResponse
 
 router = APIRouter(prefix="/providers/swiggy", tags=["providers"])
@@ -43,19 +47,22 @@ async def callback(
 
     Always redirects to the app's fixed deep link, on success or failure, so
     the mobile action queue can resume the pending action (R2.4) either way.
+
+    Raises:
+        ProviderNotConfiguredError: If Swiggy OAuth is not configured on
+            this deployment; Swiggy could never have redirected here without
+            a registered app, so this only fires on a misconfigured server.
     """
+    deep_link = provider_settings.APP_CALLBACK_DEEP_LINK
+    if deep_link is None:
+        raise ProviderNotConfiguredError
+
     if error or not code or not state:
-        return RedirectResponse(
-            f"{provider_settings.APP_CALLBACK_DEEP_LINK}?swiggy_link=error"
-        )
+        return RedirectResponse(f"{deep_link}?swiggy_link=error")
 
     try:
         await service.complete_authorization(session, state=state, code=code)
     except (InvalidOAuthStateError, SwiggyTokenExchangeError):
-        return RedirectResponse(
-            f"{provider_settings.APP_CALLBACK_DEEP_LINK}?swiggy_link=error"
-        )
+        return RedirectResponse(f"{deep_link}?swiggy_link=error")
 
-    return RedirectResponse(
-        f"{provider_settings.APP_CALLBACK_DEEP_LINK}?swiggy_link=success"
-    )
+    return RedirectResponse(f"{deep_link}?swiggy_link=success")
