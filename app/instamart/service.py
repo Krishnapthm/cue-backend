@@ -1,5 +1,5 @@
 """Instamart tool wrappers: addresses (CUE-10), search_products (CUE-11),
-cart (CUE-16), checkout (CUE-19).
+cart (CUE-16), checkout (CUE-19), order history + details (CUE-13).
 
 Every call resolves the user's live Swiggy access token first (R2.5): no
 usable token means "not linked or reconnect needed", which is routed through
@@ -18,12 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.instamart import client
 from app.instamart.constants import (
     DEFAULT_GET_ORDERS_COUNT,
+    DEFAULT_ORDER_TYPE,
     DEFAULT_SEARCH_OFFSET,
+    MAX_GET_ORDERS_COUNT,
     TOOL_CHECKOUT,
     TOOL_CREATE_ADDRESS,
     TOOL_DELETE_ADDRESS,
     TOOL_GET_ADDRESSES,
     TOOL_GET_CART,
+    TOOL_GET_ORDER_DETAILS,
     TOOL_GET_ORDERS,
     TOOL_SEARCH_PRODUCTS,
     TOOL_UPDATE_CART,
@@ -37,6 +40,7 @@ from app.instamart.schemas import (
     CheckoutResult,
     CreateAddressRequest,
     GoToItem,
+    OrderDetails,
     OrderSummary,
     PreferenceSignal,
     Product,
@@ -166,16 +170,52 @@ async def checkout(
 
 
 async def get_orders(
-    session: AsyncSession, user_id: int, *, count: int = DEFAULT_GET_ORDERS_COUNT
+    session: AsyncSession,
+    user_id: int,
+    *,
+    count: int = DEFAULT_GET_ORDERS_COUNT,
+    order_type: str = DEFAULT_ORDER_TYPE,
+    active_only: bool = False,
 ) -> list[OrderSummary]:
-    """List the user's recent Instamart orders (R6.3 checkout reconciliation)."""
+    """List the user's recent Instamart orders (R6.3 reconciliation, R10.1 history).
+
+    `order_type` defaults to "INSTAMART" and is always sent explicitly -
+    get_orders' own tool default is "DASH" (food delivery), which is wrong
+    for Cue. `count` is clamped to `MAX_GET_ORDERS_COUNT` client-side before
+    it is sent; Swiggy's documented maximum is 20.
+    """
+    clamped_count = min(count, MAX_GET_ORDERS_COUNT)
     data = await _call_authenticated(
-        session, user_id, TOOL_GET_ORDERS, {"count": count}
+        session,
+        user_id,
+        TOOL_GET_ORDERS,
+        {
+            "count": clamped_count,
+            "orderType": order_type,
+            "activeOnly": active_only,
+        },
     )
     # The envelope key holding the list isn't pinned by Swiggy's docs; accept
     # either a bare list or one nested under "orders".
     raw_orders = data.get("orders", []) if isinstance(data, dict) else data or []
     return [OrderSummary.model_validate(item) for item in raw_orders]
+
+
+async def get_order_details(
+    session: AsyncSession, user_id: int, order_id: str
+) -> OrderDetails:
+    """Fetch full detail for a single order, including line items (R10.2).
+
+    An order id that doesn't belong to the caller (or doesn't exist) comes
+    back as `success: false`, which `client.call_tool` already turns into
+    `InstamartDomainError` before this function ever sees the payload - no
+    extra handling is needed here for that case.
+    """
+    data = await _call_authenticated(
+        session, user_id, TOOL_GET_ORDER_DETAILS, {"orderId": order_id}
+    )
+    raw_order = data.get("order", data) if isinstance(data, dict) else data
+    return OrderDetails.model_validate(raw_order or {})
 
 
 async def get_go_to_items(

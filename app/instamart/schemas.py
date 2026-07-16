@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -162,16 +163,43 @@ class CheckoutResult(BaseModel):
 class OrderSummary(BaseModel):
     """One entry from get_orders.
 
-    Used to check whether a checkout landed after a transport failure
-    (R6.3) - never as an order-history mirror; Order History reads
-    get_orders directly.
+    Used both to check whether a checkout landed after a transport failure
+    (R6.3 reconciliation) and as the Order-History list shape (R10.1) -
+    `get_orders` is the single source for both. `items`/`address` are
+    tool-specific and not further typed until a screen needs more than
+    passthrough display.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     order_id: str = Field(alias="orderId")
-    status: str | None = None
-    total: Decimal | None = None
+    status: str
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    address: dict[str, Any] | None = None
+
+
+class OrderLineItem(BaseModel):
+    """One line item of an order, from get_order_details."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    product_name: str = Field(alias="productName")
+    quantity: int
+    price: Decimal
+
+
+class OrderDetails(BaseModel):
+    """Full detail of a single order, from get_order_details (R10.2)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    order_id: str = Field(alias="orderId")
+    status: str
+    items: list[OrderLineItem]
+    item_total: Decimal | None = Field(default=None, alias="itemTotal")
+    delivery_fee: Decimal | None = Field(default=None, alias="deliveryFee")
+    handling_fee: Decimal | None = Field(default=None, alias="handlingFee")
+    grand_total: Decimal | None = Field(default=None, alias="grandTotal")
 
 
 class GoToItemVariant(BaseModel):
