@@ -14,8 +14,12 @@ TOOL_DELETE_ADDRESS = "delete_address"
 TOOL_SEARCH_PRODUCTS = "search_products"
 TOOL_UPDATE_CART = "update_cart"
 TOOL_GET_CART = "get_cart"
+TOOL_CHECKOUT = "checkout"
+TOOL_GET_ORDERS = "get_orders"
 
 DEFAULT_SEARCH_OFFSET = 0
+# Matches get_orders' own documented default.
+DEFAULT_GET_ORDERS_COUNT = 10
 
 REQUEST_TIMEOUT_SECONDS = 10.0
 

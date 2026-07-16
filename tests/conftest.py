@@ -113,6 +113,10 @@ class InstamartToolCallStub:
         }
     )
     raises: Exception | None = None
+    # Per-tool-name overrides of the default (status_code, response), for
+    # tests exercising a flow that calls more than one tool (e.g. get_cart
+    # then checkout) where each call needs a different outcome.
+    by_tool: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = field(default_factory=list)
 
     def configure(
@@ -130,8 +134,26 @@ class InstamartToolCallStub:
             self.json_body = {"jsonrpc": "2.0", "id": 1, "result": result}
         self.raises = raises
 
+    def configure_tool_result(
+        self, tool_name: str, result: dict[str, Any], *, status_code: int = 200
+    ) -> None:
+        """Set a distinct outcome for one tool name only."""
+        self.by_tool[tool_name] = (
+            status_code,
+            {"jsonrpc": "2.0", "id": 1, "result": result},
+        )
+
+    def configure_tool_status(self, tool_name: str, status_code: int) -> None:
+        """Set a distinct HTTP status (e.g. 503) for one tool name only."""
+        self.by_tool[tool_name] = (status_code, {"jsonrpc": "2.0", "id": 1})
+
     def record_call(self, *args: Any, **kwargs: Any) -> None:
         self.calls.append((args, kwargs))
+
+    def response_for(self, tool_name: str | None) -> tuple[int, dict[str, Any]]:
+        if tool_name is not None and tool_name in self.by_tool:
+            return self.by_tool[tool_name]
+        return self.status_code, self.json_body
 
 
 @pytest.fixture
@@ -148,12 +170,12 @@ def mock_instamart_tool_call(
     stub = InstamartToolCallStub()
 
     class _FakeResponse:
-        @property
-        def status_code(self) -> int:
-            return stub.status_code
+        def __init__(self, status_code: int, json_body: dict[str, Any]) -> None:
+            self.status_code = status_code
+            self._json_body = json_body
 
         def json(self) -> dict[str, Any]:
-            return stub.json_body
+            return self._json_body
 
     class _FakeAsyncClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -169,7 +191,9 @@ def mock_instamart_tool_call(
             stub.record_call(*args, **kwargs)
             if stub.raises is not None:
                 raise stub.raises
-            return _FakeResponse()
+            tool_name = kwargs.get("json", {}).get("params", {}).get("name")
+            status_code, json_body = stub.response_for(tool_name)
+            return _FakeResponse(status_code, json_body)
 
     monkeypatch.setattr("app.instamart.client.httpx.AsyncClient", _FakeAsyncClient)
     return stub
