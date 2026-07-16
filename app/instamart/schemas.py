@@ -99,3 +99,46 @@ class Product(BaseModel):
     name: str | None = None
     brand: str | None = None
     variants: list[ProductVariant] = Field(default_factory=list)
+
+
+class CartItemInput(BaseModel):
+    """One `update_cart` line item, exactly as Swiggy's docs specify it."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    spin_id: str = Field(alias="spinId")
+    quantity: int = Field(gt=0)
+
+
+class CartLineItem(BaseModel):
+    """One line of the server cart (get_cart / update_cart's response).
+
+    Field names beyond `spin_id`/`quantity` (the request-side contract) are
+    not documented; the rest parse defensively and are optional.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    spin_id: str = Field(alias="spinId")
+    quantity: int
+    price: Decimal | None = None
+    product_name: str | None = Field(default=None, alias="productName")
+
+
+class Cart(BaseModel):
+    """The server cart - the source of truth before confirm and checkout (R5.2).
+
+    Swiggy's docs confirm `availablePaymentMethods` and prose-describe "a
+    pricing breakdown and totals" and "minimum order requirements"; the exact
+    keys for those aren't spelled out, so `total`/`minimum_order_value` parse
+    defensively and are optional.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    items: list[CartLineItem] = Field(default_factory=list)
+    total: Decimal | None = None
+    minimum_order_value: Decimal | None = Field(default=None, alias="minimumOrderValue")
+    available_payment_methods: list[str] = Field(
+        default_factory=list, alias="availablePaymentMethods"
+    )
