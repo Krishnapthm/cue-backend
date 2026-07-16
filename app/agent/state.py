@@ -23,9 +23,17 @@ class AgentState(TypedDict):
     TypedDict) so state literals built before recipe generation existed - and
     partial node updates that never touch it - stay valid without every
     caller having to pass `recipe=None` explicitly.
+
+    `image_object_path` is the Supabase Storage object path of an uploaded
+    recipe photo, sourced from `ChatMessage.payload` (kind='image', see
+    `app/models/chat.py`). It is `NotRequired` for the same reason as
+    `recipe`: most turns never carry an image, and the payload -> state
+    extraction at the app/graph boundary is wired in a later issue (this
+    field only defines the contract `parse_recipe_photo_node` reads from).
     """
 
     session_id: str
     user_id: int
     messages: Annotated[list[BaseMessage], add_messages]
     recipe: NotRequired[GeneratedRecipe | None]
+    image_object_path: NotRequired[str | None]

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import base64
 import logging
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import (
+    HumanMessage,
+    ImageContentBlock,
+    SystemMessage,
+    TextContentBlock,
+)
 from pydantic import ValidationError
 
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.providers import get_chat_model
 from app.agent.schemas import GeneratedRecipe
 from app.agent.state import AgentState
+from app.agent.storage import get_image_store
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +102,162 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
             logger.error(
                 "Recipe generation failed again for dish %r after retry: %s",
                 dish_name,
+                retry_exc,
+            )
+            raise RecipeGenerationError() from retry_exc
+
+    if not isinstance(recipe, GeneratedRecipe):
+        # with_structured_output(GeneratedRecipe) is documented to return a
+        # GeneratedRecipe instance (not a raw dict) when passed a Pydantic
+        # schema; this guards that contract defensively at runtime.
+        raise RecipeGenerationError()
+
+    return {"recipe": recipe}
+
+
+_PHOTO_SYSTEM_PROMPT = (
+    "You are a recipe generation assistant. You will be given a photo of a "
+    "recipe (e.g. a cookbook page, a handwritten note, a packaging label, or "
+    "a screenshot). Read the image and produce the same structured recipe "
+    "schema used for text-based recipe generation: a list of ingredients "
+    "(name, quantity, unit) and a brief method summary.\n"
+    "\n"
+    "Rules:\n"
+    "- Always produce a complete, best-effort structured recipe, even if the "
+    "photo is blurry, partially cropped, low-resolution, or otherwise hard "
+    "to read. Never refuse and never respond with an error message in place "
+    "of the structured output - extract everything you can read with "
+    "reasonable confidence.\n"
+    "- If the photo is not a recipe at all (e.g. an unrelated photo with no "
+    "ingredients or cooking instructions visible), return an EMPTY "
+    "ingredients list and set method_summary to a brief plain-text note that "
+    "nothing recipe-related was recognized in the image. Do this instead of "
+    "raising an error or refusing.\n"
+    "- Quantities and units are optional per ingredient - omit them (leave "
+    "null) rather than guessing a number you cannot read with reasonable "
+    "confidence.\n"
+    "- The method summary must be brief plain text (a few sentences), never "
+    "markdown, bullet points, or numbered steps.\n"
+    "- estimated_time_minutes is your best-effort total time (prep + cook) "
+    "in minutes; if the image is unreadable or not a recipe, use 0.\n"
+    "- dish_name is your best-effort read of the dish's name; if unreadable "
+    "or not a recipe at all, use a short literal description of what the "
+    "image shows instead."
+)
+
+_IMAGE_MIME_TYPES: dict[str, str] = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+}
+_DEFAULT_IMAGE_MIME_TYPE = "image/jpeg"
+
+
+def _infer_image_mime_type(object_path: str) -> str:
+    """Infer an image MIME type from an object path's suffix.
+
+    Args:
+        object_path: The Supabase Storage object path (e.g.
+            "recipes/abc123.jpg").
+
+    Returns:
+        The inferred MIME type, or `_DEFAULT_IMAGE_MIME_TYPE` if the suffix
+        is unrecognized or absent.
+    """
+    suffix = Path(object_path).suffix.lower()
+    return _IMAGE_MIME_TYPES.get(suffix, _DEFAULT_IMAGE_MIME_TYPE)
+
+
+async def parse_recipe_photo_node(state: AgentState) -> dict[str, Any]:
+    """Parse an uploaded recipe photo into a structured recipe.
+
+    Reads the Supabase Storage object path from
+    `state["image_object_path"]` - carried from `ChatMessage.payload`
+    (kind='image', see `app/models/chat.py`); the payload -> state extraction
+    at the app/graph boundary happens in a later wiring issue, so it is out
+    of scope here (this node, like `generate_recipe_node`, is not yet wired
+    into `build_graph`). Nodes only receive `state`, never a DB session, so
+    the image bytes are fetched through the `get_image_store` seam
+    (`app.agent.storage`) rather than a repository call.
+
+    The fetched bytes are base64-encoded into a provider-agnostic image
+    content block and sent to the configured chat model with the same
+    `with_structured_output(GeneratedRecipe)` contract `generate_recipe_node`
+    uses, so both intake paths (typed dish name, uploaded photo) render
+    through the exact same `GeneratedRecipe` schema - one review surface, per
+    the issue's acceptance criteria.
+
+    Downscaling large source images is deliberately NOT done here: per the
+    issue, an oversized source image is a cost/latency concern, not a
+    correctness one, so resizing belongs at the upload boundary (before the
+    object ever reaches storage), not in this node. Adding an image library
+    here to shrink pixels would be scope creep against that framing.
+
+    Args:
+        state: The current graph state. Must have `image_object_path` set to
+            a non-empty Supabase Storage object path.
+
+    Returns:
+        A partial state update containing the parsed `recipe`. This is a
+        partial dict rather than a full `AgentState` (see
+        `generate_recipe_node`'s docstring for why).
+
+    Raises:
+        ValueError: `state["image_object_path"]` is missing or empty, so
+            there is no image to parse.
+        RecipeGenerationError: The model failed to produce a valid
+            structured recipe twice in a row (initial attempt + one retry).
+    """
+    object_path = state.get("image_object_path")
+    if not object_path:
+        raise ValueError(
+            "Cannot parse a recipe photo: state has no image_object_path to "
+            "load an image from."
+        )
+
+    image_bytes = await get_image_store().load(object_path)
+    image_base64 = base64.b64encode(image_bytes).decode("ascii")
+    mime_type = _infer_image_mime_type(object_path)
+
+    structured_model = get_chat_model().with_structured_output(GeneratedRecipe)
+    # `HumanMessage.content` is typed as `list[str | dict[str, Any]]`; the
+    # standard content-block TypedDicts are structurally dicts at runtime, so
+    # the cast below only satisfies mypy - it does not change the payload.
+    content: list[str | dict[str, Any]] = [
+        cast(
+            "dict[str, Any]",
+            TextContentBlock(
+                type="text", text="Extract the recipe shown in this photo."
+            ),
+        ),
+        cast(
+            "dict[str, Any]",
+            ImageContentBlock(type="image", base64=image_base64, mime_type=mime_type),
+        ),
+    ]
+    prompt = [
+        SystemMessage(content=_PHOTO_SYSTEM_PROMPT),
+        HumanMessage(content=content),
+    ]
+
+    try:
+        recipe = await structured_model.ainvoke(prompt)
+    except (ValidationError, OutputParserException) as exc:
+        logger.warning(
+            "Recipe photo parse returned malformed output for %r; retrying once: %s",
+            object_path,
+            exc,
+        )
+        try:
+            recipe = await structured_model.ainvoke(prompt)
+        except (ValidationError, OutputParserException) as retry_exc:
+            logger.error(
+                "Recipe photo parse failed again for %r after retry: %s",
+                object_path,
                 retry_exc,
             )
             raise RecipeGenerationError() from retry_exc
