@@ -5,7 +5,7 @@ from typing import Annotated, NotRequired, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
-from app.agent.schemas import GeneratedRecipe
+from app.agent.schemas import GeneratedRecipe, NormalizedIngredient
 
 
 class AgentState(TypedDict):
@@ -30,6 +30,17 @@ class AgentState(TypedDict):
     `recipe`: most turns never carry an image, and the payload -> state
     extraction at the app/graph boundary is wired in a later issue (this
     field only defines the contract `parse_recipe_photo_node` reads from).
+
+    `have_marks` is the set of ingredient names the user checked as
+    already-owned on the have-list UI (client-side capture, out of scope
+    here). It is `NotRequired` for the same reason as `recipe` - most state
+    literals never touch it, and `normalize_ingredients_node` reads it via
+    `state.get("have_marks") or set()`.
+
+    `normalized_ingredients` is `normalize_ingredients_node`'s output: the
+    same `GeneratedRecipe.ingredients` reshaped into `(name, quantity/unit,
+    have/need)` rows. It is `NotRequired` because it only exists once that
+    node has run.
     """
 
     session_id: str
@@ -37,3 +48,5 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     recipe: NotRequired[GeneratedRecipe | None]
     image_object_path: NotRequired[str | None]
+    have_marks: NotRequired[set[str]]
+    normalized_ingredients: NotRequired[list[NormalizedIngredient]]
