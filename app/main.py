@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.chat.router import router as chat_router
 from app.config import Environment, settings
 from app.database import engine
 from app.exceptions import register_exception_handlers
@@ -41,3 +42,4 @@ app = FastAPI(
 register_exception_handlers(app)
 app.include_router(health_router)
 app.include_router(providers_router)
+app.include_router(chat_router)
