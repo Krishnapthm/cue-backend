@@ -164,6 +164,74 @@ async def test_get_link_returns_the_row_when_linked(
     assert link.id == active_link.id
 
 
+async def test_get_decrypted_access_token_returns_none_when_not_linked(
+    db_session: AsyncSession, user: User
+) -> None:
+    token = await service.get_decrypted_access_token(db_session, user.id)
+
+    assert token is None
+
+
+async def test_get_decrypted_access_token_decrypts_an_active_link(
+    db_session: AsyncSession, user: User
+) -> None:
+    db_session.add(
+        ProviderLink(
+            user_id=user.id,
+            provider=PROVIDER,
+            access_token_ct=service._encrypt("at_live_token"),
+            token_expires_at=datetime.now(UTC) + timedelta(days=5),
+            scope="mcp:tools",
+            status="active",
+        )
+    )
+    await db_session.commit()
+
+    token = await service.get_decrypted_access_token(db_session, user.id)
+
+    assert token == "at_live_token"
+
+
+async def test_get_decrypted_access_token_returns_none_when_status_expired(
+    db_session: AsyncSession, user: User
+) -> None:
+    db_session.add(
+        ProviderLink(
+            user_id=user.id,
+            provider=PROVIDER,
+            access_token_ct=service._encrypt("at_live_token"),
+            token_expires_at=datetime.now(UTC) + timedelta(days=5),
+            scope="mcp:tools",
+            status="expired",
+        )
+    )
+    await db_session.commit()
+
+    token = await service.get_decrypted_access_token(db_session, user.id)
+
+    assert token is None
+
+
+async def test_get_decrypted_access_token_returns_none_when_clock_expired(
+    db_session: AsyncSession, user: User
+) -> None:
+    db_session.add(
+        ProviderLink(
+            user_id=user.id,
+            provider=PROVIDER,
+            access_token_ct=service._encrypt("at_live_token"),
+            token_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            scope="mcp:tools",
+            status="active",
+        )
+    )
+    await db_session.commit()
+
+    token = await service.get_decrypted_access_token(db_session, user.id)
+
+    assert token is None
+
+
 async def test_mark_link_expired_flips_status_without_touching_other_columns(
     db_session: AsyncSession, user: User, active_link: ProviderLink
 ) -> None:

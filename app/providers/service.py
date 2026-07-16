@@ -217,6 +217,26 @@ async def get_link(
     return result.scalar_one_or_none()
 
 
+async def get_decrypted_access_token(
+    session: AsyncSession, user_id: int, provider: str = PROVIDER
+) -> str | None:
+    """Return the user's live Swiggy access token, or None if unusable.
+
+    None covers every case the recovery ladder (R2.5) resolves the same way -
+    not linked, revoked (`status == "expired"`), or simply clock-expired:
+    callers should treat all three as "reconnect required" and never attempt
+    a refresh, since Swiggy MCP v1.0 issues no refresh token.
+    """
+    link = await get_link(session, user_id, provider)
+    if (
+        link is None
+        or link.status == "expired"
+        or link.token_expires_at <= datetime.now(UTC)
+    ):
+        return None
+    return _decrypt(link.access_token_ct)
+
+
 async def mark_link_expired(
     session: AsyncSession, user_id: int, provider: str = PROVIDER
 ) -> None:
