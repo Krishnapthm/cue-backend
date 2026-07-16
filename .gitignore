@@ -13,3 +13,6 @@ wheels/
 .env
 .env.*
 !.env.example
+
+# Claude Code: transient agent worktrees (never commit these)
+.claude/worktrees/
