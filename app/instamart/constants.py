@@ -16,6 +16,7 @@ TOOL_UPDATE_CART = "update_cart"
 TOOL_GET_CART = "get_cart"
 TOOL_CHECKOUT = "checkout"
 TOOL_GET_ORDERS = "get_orders"
+TOOL_YOUR_GO_TO_ITEMS = "your_go_to_items"
 
 DEFAULT_SEARCH_OFFSET = 0
 # Matches get_orders' own documented default.

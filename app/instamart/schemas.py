@@ -172,3 +172,40 @@ class OrderSummary(BaseModel):
     order_id: str = Field(alias="orderId")
     status: str | None = None
     total: Decimal | None = None
+
+
+class GoToItemVariant(BaseModel):
+    """One variant of a your_go_to_items entry (R4.3 preference bootstrap).
+
+    Mirrors `ProductVariant`'s shape for the fields your_go_to_items shares
+    with search_products; the tool is assumed to return each item's variants
+    most-ordered-first, so `variants[0]` is the preferred variant.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    spin_id: str = Field(alias="spinId")
+    pack_size: str | None = Field(default=None, alias="packSize")
+    price: Decimal | None = None
+
+
+class GoToItem(BaseModel):
+    """One product the user has previously ordered (your_go_to_items, R4.3)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    product_name: str = Field(alias="productName")
+    category: str | None = None
+    variants: list[GoToItemVariant] = Field(default_factory=list)
+
+
+class PreferenceSignal(BaseModel):
+    """A normalized preference signal consumed by variant selection (R4.3).
+
+    `brand` is always `None` when built from `GoToItem` data - `GoToItem`
+    carries no brand field. The field exists to match the shape the
+    variant-selection consumer expects, not because this source populates it.
+    """
+
+    spin_id: str
+    brand: str | None = None

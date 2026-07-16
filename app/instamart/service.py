@@ -27,6 +27,7 @@ from app.instamart.constants import (
     TOOL_GET_ORDERS,
     TOOL_SEARCH_PRODUCTS,
     TOOL_UPDATE_CART,
+    TOOL_YOUR_GO_TO_ITEMS,
 )
 from app.instamart.exceptions import InstamartAuthError
 from app.instamart.schemas import (
@@ -35,7 +36,9 @@ from app.instamart.schemas import (
     CartItemInput,
     CheckoutResult,
     CreateAddressRequest,
+    GoToItem,
     OrderSummary,
+    PreferenceSignal,
     Product,
 )
 from app.providers import service as provider_service
@@ -173,3 +176,40 @@ async def get_orders(
     # either a bare list or one nested under "orders".
     raw_orders = data.get("orders", []) if isinstance(data, dict) else data or []
     return [OrderSummary.model_validate(item) for item in raw_orders]
+
+
+async def get_go_to_items(
+    session: AsyncSession, user_id: int, address_id: str, offset: int = 0
+) -> list[GoToItem]:
+    """your_go_to_items wrapper (R4.3 preference bootstrap)."""
+    data = await _call_authenticated(
+        session,
+        user_id,
+        TOOL_YOUR_GO_TO_ITEMS,
+        {"addressId": address_id, "offset": offset},
+    )
+    # The envelope key holding the list isn't pinned by Swiggy's docs; accept
+    # either a bare list or one nested under "items".
+    raw_items = data.get("items", []) if isinstance(data, dict) else data or []
+    return [GoToItem.model_validate(item) for item in raw_items]
+
+
+def normalize_preferences(items: list[GoToItem]) -> dict[str, PreferenceSignal]:
+    """Map category/ingredient name -> the most-ordered spinId/brand.
+
+    Each `GoToItem`'s variants are assumed most-ordered-first, so
+    `variants[0]` is the preferred variant; items with no variants are
+    skipped rather than raising. The first occurrence of a given
+    `product_name` wins, so a later, less-ordered duplicate never overwrites
+    the most-ordered signal. `PreferenceSignal.brand` is always `None` here -
+    see `PreferenceSignal`'s docstring.
+    """
+    preferences: dict[str, PreferenceSignal] = {}
+    for item in items:
+        if not item.variants:
+            continue
+        preferences.setdefault(
+            item.product_name,
+            PreferenceSignal(spin_id=item.variants[0].spin_id, brand=None),
+        )
+    return preferences
