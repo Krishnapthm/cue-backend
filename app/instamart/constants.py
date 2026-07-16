@@ -18,6 +18,7 @@ TOOL_CHECKOUT = "checkout"
 TOOL_GET_ORDERS = "get_orders"
 TOOL_GET_ORDER_DETAILS = "get_order_details"
 TOOL_YOUR_GO_TO_ITEMS = "your_go_to_items"
+TOOL_TRACK_ORDER = "track_order"
 
 DEFAULT_SEARCH_OFFSET = 0
 # Matches get_orders' own documented default.

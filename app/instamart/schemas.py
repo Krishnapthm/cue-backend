@@ -227,6 +227,25 @@ class GoToItem(BaseModel):
     variants: list[GoToItemVariant] = Field(default_factory=list)
 
 
+class OrderTracking(BaseModel):
+    """Live tracking state for a single order, from track_order (CUE-14).
+
+    Swiggy's docs don't pin the exact response field names for this tool;
+    `order_id`/`status` mirror the shape every other order-scoped response
+    uses (`orderId`, `status`), and `eta`/`delivery_partner_location` parse
+    defensively and are optional so a partial payload still validates.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    order_id: str = Field(alias="orderId")
+    status: str
+    eta: str | None = None
+    delivery_partner_location: dict[str, float] | None = Field(
+        default=None, alias="deliveryPartnerLocation"
+    )
+
+
 class PreferenceSignal(BaseModel):
     """A normalized preference signal consumed by variant selection (R4.3).
 

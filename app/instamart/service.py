@@ -1,5 +1,6 @@
 """Instamart tool wrappers: addresses (CUE-10), search_products (CUE-11),
-cart (CUE-16), checkout (CUE-19), order history + details (CUE-13).
+cart (CUE-16), checkout (CUE-19), order history + details (CUE-13),
+track_order (CUE-14).
 
 Every call resolves the user's live Swiggy access token first (R2.5): no
 usable token means "not linked or reconnect needed", which is routed through
@@ -29,6 +30,7 @@ from app.instamart.constants import (
     TOOL_GET_ORDER_DETAILS,
     TOOL_GET_ORDERS,
     TOOL_SEARCH_PRODUCTS,
+    TOOL_TRACK_ORDER,
     TOOL_UPDATE_CART,
     TOOL_YOUR_GO_TO_ITEMS,
 )
@@ -42,6 +44,7 @@ from app.instamart.schemas import (
     GoToItem,
     OrderDetails,
     OrderSummary,
+    OrderTracking,
     PreferenceSignal,
     Product,
 )
@@ -232,6 +235,29 @@ async def get_go_to_items(
     # either a bare list or one nested under "items".
     raw_items = data.get("items", []) if isinstance(data, dict) else data or []
     return [GoToItem.model_validate(item) for item in raw_items]
+
+
+async def track_order(
+    session: AsyncSession, user_id: int, order_id: str, *, lat: float, lng: float
+) -> OrderTracking:
+    """Fetch live tracking state for a single order (CUE-14).
+
+    `lat`/`lng` are the caller's current location, forwarded to Swiggy so it
+    can compute delivery-partner distance/ETA; the poll-rate floor that
+    protects Swiggy from being hammered lives in `app.orders.service`, not
+    here - this wrapper always makes a live call when invoked.
+    """
+    data = await _call_authenticated(
+        session,
+        user_id,
+        TOOL_TRACK_ORDER,
+        {"orderId": order_id, "lat": lat, "lng": lng},
+    )
+    # Neither the envelope key nor the request arg names for track_order are
+    # pinned by Swiggy's docs; accept the tracking payload nested under
+    # "tracking" or returned as the data payload directly.
+    raw = data.get("tracking", data) if isinstance(data, dict) else data
+    return OrderTracking.model_validate(raw or {})
 
 
 def normalize_preferences(items: list[GoToItem]) -> dict[str, PreferenceSignal]:
