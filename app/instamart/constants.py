@@ -16,10 +16,18 @@ TOOL_UPDATE_CART = "update_cart"
 TOOL_GET_CART = "get_cart"
 TOOL_CHECKOUT = "checkout"
 TOOL_GET_ORDERS = "get_orders"
+TOOL_GET_ORDER_DETAILS = "get_order_details"
+TOOL_YOUR_GO_TO_ITEMS = "your_go_to_items"
+TOOL_TRACK_ORDER = "track_order"
 
 DEFAULT_SEARCH_OFFSET = 0
 # Matches get_orders' own documented default.
 DEFAULT_GET_ORDERS_COUNT = 10
+# get_orders' documented maximum; higher requests are clamped client-side.
+MAX_GET_ORDERS_COUNT = 20
+# get_orders' own tool default is "DASH" (food delivery), which is wrong for
+# Cue - we always send this explicitly instead of relying on Swiggy's default.
+DEFAULT_ORDER_TYPE = "INSTAMART"
 
 REQUEST_TIMEOUT_SECONDS = 10.0
 

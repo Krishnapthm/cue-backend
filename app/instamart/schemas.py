@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -162,13 +163,96 @@ class CheckoutResult(BaseModel):
 class OrderSummary(BaseModel):
     """One entry from get_orders.
 
-    Used to check whether a checkout landed after a transport failure
-    (R6.3) - never as an order-history mirror; Order History reads
-    get_orders directly.
+    Used both to check whether a checkout landed after a transport failure
+    (R6.3 reconciliation) and as the Order-History list shape (R10.1) -
+    `get_orders` is the single source for both. `items`/`address` are
+    tool-specific and not further typed until a screen needs more than
+    passthrough display.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     order_id: str = Field(alias="orderId")
-    status: str | None = None
-    total: Decimal | None = None
+    status: str
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    address: dict[str, Any] | None = None
+
+
+class OrderLineItem(BaseModel):
+    """One line item of an order, from get_order_details."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    product_name: str = Field(alias="productName")
+    quantity: int
+    price: Decimal
+
+
+class OrderDetails(BaseModel):
+    """Full detail of a single order, from get_order_details (R10.2)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    order_id: str = Field(alias="orderId")
+    status: str
+    items: list[OrderLineItem]
+    item_total: Decimal | None = Field(default=None, alias="itemTotal")
+    delivery_fee: Decimal | None = Field(default=None, alias="deliveryFee")
+    handling_fee: Decimal | None = Field(default=None, alias="handlingFee")
+    grand_total: Decimal | None = Field(default=None, alias="grandTotal")
+
+
+class GoToItemVariant(BaseModel):
+    """One variant of a your_go_to_items entry (R4.3 preference bootstrap).
+
+    Mirrors `ProductVariant`'s shape for the fields your_go_to_items shares
+    with search_products; the tool is assumed to return each item's variants
+    most-ordered-first, so `variants[0]` is the preferred variant.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    spin_id: str = Field(alias="spinId")
+    pack_size: str | None = Field(default=None, alias="packSize")
+    price: Decimal | None = None
+
+
+class GoToItem(BaseModel):
+    """One product the user has previously ordered (your_go_to_items, R4.3)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    product_name: str = Field(alias="productName")
+    category: str | None = None
+    variants: list[GoToItemVariant] = Field(default_factory=list)
+
+
+class OrderTracking(BaseModel):
+    """Live tracking state for a single order, from track_order (CUE-14).
+
+    Swiggy's docs don't pin the exact response field names for this tool;
+    `order_id`/`status` mirror the shape every other order-scoped response
+    uses (`orderId`, `status`), and `eta`/`delivery_partner_location` parse
+    defensively and are optional so a partial payload still validates.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    order_id: str = Field(alias="orderId")
+    status: str
+    eta: str | None = None
+    delivery_partner_location: dict[str, float] | None = Field(
+        default=None, alias="deliveryPartnerLocation"
+    )
+
+
+class PreferenceSignal(BaseModel):
+    """A normalized preference signal consumed by variant selection (R4.3).
+
+    `brand` is always `None` when built from `GoToItem` data - `GoToItem`
+    carries no brand field. The field exists to match the shape the
+    variant-selection consumer expects, not because this source populates it.
+    """
+
+    spin_id: str
+    brand: str | None = None

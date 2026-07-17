@@ -1,5 +1,6 @@
 """Instamart tool wrappers: addresses (CUE-10), search_products (CUE-11),
-cart (CUE-16), checkout (CUE-19).
+cart (CUE-16), checkout (CUE-19), order history + details (CUE-13),
+track_order (CUE-14).
 
 Every call resolves the user's live Swiggy access token first (R2.5): no
 usable token means "not linked or reconnect needed", which is routed through
@@ -18,15 +19,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.instamart import client
 from app.instamart.constants import (
     DEFAULT_GET_ORDERS_COUNT,
+    DEFAULT_ORDER_TYPE,
     DEFAULT_SEARCH_OFFSET,
+    MAX_GET_ORDERS_COUNT,
     TOOL_CHECKOUT,
     TOOL_CREATE_ADDRESS,
     TOOL_DELETE_ADDRESS,
     TOOL_GET_ADDRESSES,
     TOOL_GET_CART,
+    TOOL_GET_ORDER_DETAILS,
     TOOL_GET_ORDERS,
     TOOL_SEARCH_PRODUCTS,
+    TOOL_TRACK_ORDER,
     TOOL_UPDATE_CART,
+    TOOL_YOUR_GO_TO_ITEMS,
 )
 from app.instamart.exceptions import InstamartAuthError
 from app.instamart.schemas import (
@@ -35,7 +41,11 @@ from app.instamart.schemas import (
     CartItemInput,
     CheckoutResult,
     CreateAddressRequest,
+    GoToItem,
+    OrderDetails,
     OrderSummary,
+    OrderTracking,
+    PreferenceSignal,
     Product,
 )
 from app.providers import service as provider_service
@@ -163,13 +173,109 @@ async def checkout(
 
 
 async def get_orders(
-    session: AsyncSession, user_id: int, *, count: int = DEFAULT_GET_ORDERS_COUNT
+    session: AsyncSession,
+    user_id: int,
+    *,
+    count: int = DEFAULT_GET_ORDERS_COUNT,
+    order_type: str = DEFAULT_ORDER_TYPE,
+    active_only: bool = False,
 ) -> list[OrderSummary]:
-    """List the user's recent Instamart orders (R6.3 checkout reconciliation)."""
+    """List the user's recent Instamart orders (R6.3 reconciliation, R10.1 history).
+
+    `order_type` defaults to "INSTAMART" and is always sent explicitly -
+    get_orders' own tool default is "DASH" (food delivery), which is wrong
+    for Cue. `count` is clamped to `MAX_GET_ORDERS_COUNT` client-side before
+    it is sent; Swiggy's documented maximum is 20.
+    """
+    clamped_count = min(count, MAX_GET_ORDERS_COUNT)
     data = await _call_authenticated(
-        session, user_id, TOOL_GET_ORDERS, {"count": count}
+        session,
+        user_id,
+        TOOL_GET_ORDERS,
+        {
+            "count": clamped_count,
+            "orderType": order_type,
+            "activeOnly": active_only,
+        },
     )
     # The envelope key holding the list isn't pinned by Swiggy's docs; accept
     # either a bare list or one nested under "orders".
     raw_orders = data.get("orders", []) if isinstance(data, dict) else data or []
     return [OrderSummary.model_validate(item) for item in raw_orders]
+
+
+async def get_order_details(
+    session: AsyncSession, user_id: int, order_id: str
+) -> OrderDetails:
+    """Fetch full detail for a single order, including line items (R10.2).
+
+    An order id that doesn't belong to the caller (or doesn't exist) comes
+    back as `success: false`, which `client.call_tool` already turns into
+    `InstamartDomainError` before this function ever sees the payload - no
+    extra handling is needed here for that case.
+    """
+    data = await _call_authenticated(
+        session, user_id, TOOL_GET_ORDER_DETAILS, {"orderId": order_id}
+    )
+    raw_order = data.get("order", data) if isinstance(data, dict) else data
+    return OrderDetails.model_validate(raw_order or {})
+
+
+async def get_go_to_items(
+    session: AsyncSession, user_id: int, address_id: str, offset: int = 0
+) -> list[GoToItem]:
+    """your_go_to_items wrapper (R4.3 preference bootstrap)."""
+    data = await _call_authenticated(
+        session,
+        user_id,
+        TOOL_YOUR_GO_TO_ITEMS,
+        {"addressId": address_id, "offset": offset},
+    )
+    # The envelope key holding the list isn't pinned by Swiggy's docs; accept
+    # either a bare list or one nested under "items".
+    raw_items = data.get("items", []) if isinstance(data, dict) else data or []
+    return [GoToItem.model_validate(item) for item in raw_items]
+
+
+async def track_order(
+    session: AsyncSession, user_id: int, order_id: str, *, lat: float, lng: float
+) -> OrderTracking:
+    """Fetch live tracking state for a single order (CUE-14).
+
+    `lat`/`lng` are the caller's current location, forwarded to Swiggy so it
+    can compute delivery-partner distance/ETA; the poll-rate floor that
+    protects Swiggy from being hammered lives in `app.orders.service`, not
+    here - this wrapper always makes a live call when invoked.
+    """
+    data = await _call_authenticated(
+        session,
+        user_id,
+        TOOL_TRACK_ORDER,
+        {"orderId": order_id, "lat": lat, "lng": lng},
+    )
+    # Neither the envelope key nor the request arg names for track_order are
+    # pinned by Swiggy's docs; accept the tracking payload nested under
+    # "tracking" or returned as the data payload directly.
+    raw = data.get("tracking", data) if isinstance(data, dict) else data
+    return OrderTracking.model_validate(raw or {})
+
+
+def normalize_preferences(items: list[GoToItem]) -> dict[str, PreferenceSignal]:
+    """Map category/ingredient name -> the most-ordered spinId/brand.
+
+    Each `GoToItem`'s variants are assumed most-ordered-first, so
+    `variants[0]` is the preferred variant; items with no variants are
+    skipped rather than raising. The first occurrence of a given
+    `product_name` wins, so a later, less-ordered duplicate never overwrites
+    the most-ordered signal. `PreferenceSignal.brand` is always `None` here -
+    see `PreferenceSignal`'s docstring.
+    """
+    preferences: dict[str, PreferenceSignal] = {}
+    for item in items:
+        if not item.variants:
+            continue
+        preferences.setdefault(
+            item.product_name,
+            PreferenceSignal(spin_id=item.variants[0].spin_id, brand=None),
+        )
+    return preferences

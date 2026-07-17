@@ -36,6 +36,14 @@ class AgentSettings(BaseSettings):
     LANGSMITH_TRACING: bool = True
     LANGSMITH_PROJECT: str = "cue-agent"
 
+    # Supabase project base URL, used to build recipe-photo object URLs (see
+    # `app.agent.storage.SupabaseImageStore`). Optional so the app still
+    # imports without it configured; `SupabaseImageStore.load` raises a clear
+    # error if it is unset when actually invoked.
+    SUPABASE_URL: str | None = None
+    # Supabase Storage bucket that recipe photo uploads land in.
+    RECIPE_IMAGE_BUCKET: str = "recipe-images"
+
 
 @lru_cache
 def get_agent_settings() -> AgentSettings:
