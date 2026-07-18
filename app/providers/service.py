@@ -178,7 +178,8 @@ async def complete_authorization(
     payload = response.json()
     access_token: str = payload["access_token"]
     expires_in: int = payload["expires_in"]
-    scope: str = payload["scope"]
+    # RFC 6749 S5.1: scope is omitted when it matches what was requested.
+    scope: str = payload.get("scope", SWIGGY_SCOPE)
 
     insert_stmt = pg_insert(ProviderLink).values(
         user_id=txn.user_id,
