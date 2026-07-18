@@ -178,7 +178,9 @@ async def complete_authorization(
     payload = response.json()
     access_token: str = payload["access_token"]
     expires_in: int = payload["expires_in"]
-    scope: str = payload["scope"]
+    # scope: not read from the response (Swiggy may omit it per RFC 6749 S5.1);
+    # we requested SWIGGY_SCOPE, so that's what we record.
+    scope: str = SWIGGY_SCOPE
 
     insert_stmt = pg_insert(ProviderLink).values(
         user_id=txn.user_id,
