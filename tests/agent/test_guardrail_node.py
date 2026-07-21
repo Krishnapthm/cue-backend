@@ -240,3 +240,29 @@ async def test_it_classifies_the_latest_message_not_the_first(
 def test_verdict_is_a_closed_enum() -> None:
     with pytest.raises(ValidationError):
         GuardrailDecision(verdict="probably fine", reason="?")
+
+
+def test_refuse_node_appends_the_fixed_refusal() -> None:
+    # No model stub is installed: reaching a model here would fail loudly,
+    # which is the point - the refusal path must not make a second model
+    # call with attacker-influenced text in the prompt.
+    update = guardrail_node_module.refuse_node(_state(INJECTION))
+
+    messages = update["messages"]
+    assert len(messages) == 1
+    assert str(messages[0].content) == guardrail_node_module.REFUSAL_MESSAGE
+
+
+def test_refuse_node_never_echoes_the_user_or_the_reason() -> None:
+    update = guardrail_node_module.refuse_node(_state(INJECTION))
+
+    reply = str(update["messages"][0].content).lower()
+    for token in ("python", "script", "reverse", "def "):
+        assert token not in reply
+
+
+def test_refuse_node_leaves_the_recipe_untouched() -> None:
+    # A refused turn must not disturb what the session already had.
+    update = guardrail_node_module.refuse_node(_state("off topic"))
+
+    assert "recipe" not in update

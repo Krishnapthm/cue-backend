@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.nodes import recipe as recipe_node
@@ -85,7 +85,7 @@ async def test_generate_recipe_node_returns_recipe_on_state(
     update = await recipe_node.generate_recipe_node(_state("pasta aglio e olio"))
 
     # The node returns a partial state update, not a full AgentState.
-    assert update == {"recipe": recipe}
+    assert update["recipe"] == recipe
     assert update["recipe"].estimated_time_minutes == 20
     assert [i.name for i in update["recipe"].ingredients] == [
         "spaghetti",
@@ -127,7 +127,7 @@ async def test_generate_recipe_node_retries_once_on_malformed_output(
 
     update = await recipe_node.generate_recipe_node(_state("pasta aglio e olio"))
 
-    assert update == {"recipe": recipe}
+    assert update["recipe"] == recipe
 
 
 async def test_generate_recipe_node_raises_domain_error_after_two_failures(
@@ -150,3 +150,77 @@ async def test_generate_recipe_node_raises_on_empty_messages() -> None:
 
     with pytest.raises(ValueError, match="no messages"):
         await recipe_node.generate_recipe_node(empty_state)
+
+
+async def test_generate_recipe_node_appends_a_rendered_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The reply is deterministic formatting of already-validated fields, not
+    # a second model call - the fake queues exactly one result, so a second
+    # call would raise IndexError.
+    recipe = _recipe()
+    _stub_chat_model(monkeypatch, [recipe])
+
+    update = await recipe_node.generate_recipe_node(_state("pasta aglio e olio"))
+
+    messages = update["messages"]
+    assert len(messages) == 1
+    assert isinstance(messages[0], AIMessage)
+    assert str(messages[0].content) == recipe_node.render_recipe(recipe)
+
+
+def test_render_recipe_lists_every_ingredient() -> None:
+    rendered = recipe_node.render_recipe(_recipe())
+
+    assert "pasta aglio e olio" in rendered
+    assert "20 minutes" in rendered
+    assert "- spaghetti - 200 g" in rendered
+    assert "- garlic - 4 clove" in rendered
+    assert "- olive oil - 60 ml" in rendered
+    assert "Boil the pasta" in rendered
+
+
+def test_render_recipe_omits_a_missing_quantity() -> None:
+    recipe = GeneratedRecipe(
+        dish_name="salt water",
+        estimated_time_minutes=1,
+        ingredients=[
+            RecipeIngredient(name="salt"),
+            RecipeIngredient(name="water", quantity=1, unit="l"),
+            # A quantity with no unit still renders the number.
+            RecipeIngredient(name="ice", quantity=3),
+        ],
+        method_summary="Dissolve.",
+    )
+
+    rendered = recipe_node.render_recipe(recipe)
+
+    assert "- salt\n" in rendered
+    assert "- water - 1 l" in rendered
+    assert "- ice - 3" in rendered
+
+
+def test_render_recipe_formats_fractional_quantities() -> None:
+    recipe = GeneratedRecipe(
+        dish_name="dressing",
+        estimated_time_minutes=2,
+        ingredients=[RecipeIngredient(name="vinegar", quantity=1.5, unit="tbsp")],
+        method_summary="Whisk.",
+    )
+
+    # Whole numbers lose the .0, but a real fraction is preserved.
+    assert "- vinegar - 1.5 tbsp" in recipe_node.render_recipe(recipe)
+
+
+def test_render_recipe_handles_an_empty_ingredient_list() -> None:
+    recipe = GeneratedRecipe(
+        dish_name="unrecognized",
+        estimated_time_minutes=0,
+        ingredients=[],
+        method_summary="Nothing recipe-related was recognized.",
+    )
+
+    rendered = recipe_node.render_recipe(recipe)
+
+    assert "No ingredients were identified" in rendered
+    assert "Ingredients:" not in rendered

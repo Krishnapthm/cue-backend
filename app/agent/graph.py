@@ -3,46 +3,46 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.agent.nodes.guardrail import guardrail_node, refuse_node
+from app.agent.nodes.recipe import generate_recipe_node
 from app.agent.observability import configure_tracing
 from app.agent.state import AgentState
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-SMOKE_TEST_MESSAGE = "cue-agent scaffold online"
-
-
-def smoke_test_node(state: AgentState) -> dict[str, Any]:
-    """Prove the scaffold runs end to end.
-
-    Deliberately does no model or network I/O so the graph is invocable (and
-    every run traceable) without provider credentials. It emits a single
-    marker message; the `add_messages` reducer appends it to the transcript.
-
-    The return is a partial state update (LangGraph's node convention) rather
-    than a full `AgentState`, which is why it is typed `dict[str, Any]` instead
-    of `AgentState` - a partial dict cannot satisfy the total `AgentState`
-    TypedDict under strict typing.
-    """
-    logger.info("smoke_test_node running for session %s", state["session_id"])
-    return {"messages": [AIMessage(content=SMOKE_TEST_MESSAGE)]}
+GUARDRAIL = "guardrail"
+GENERATE_RECIPE = "generate_recipe"
+REFUSE = "refuse"
 
 
 def build_graph() -> StateGraph[AgentState]:
-    """Build the agent's (uncompiled) graph.
+    """Build the agent's (uncompiled) chat loop.
 
-    Skeleton: `START -> smoke_test_node -> END`. Later issues (recipe
-    generation, photo parse, normalization, substitution) add real nodes here
-    without touching this scaffold. Tracing is configured as a side effect so
-    any `build_graph().compile().ainvoke(...)` path is captured in LangSmith
-    when a key is present.
+    ```
+    START -> guardrail ---(in_scope)---> generate_recipe -> END
+                 |
+                 +------(out_of_scope)-> refuse ---------> END
+    ```
+
+    This is the smallest graph that delivers the product's core loop: the
+    user names a dish and gets its ingredient list back, and off-topic turns
+    are turned away before any recipe model call.
+
+    There is deliberately **no** static edge out of `guardrail`: it routes
+    with a `Command`, which adds a *dynamic* edge, and a static edge
+    alongside it would run both branches. `parse_recipe_photo_node` and
+    `normalize_ingredients_node` stay unwired - text input only, for now.
+
+    Tracing is configured as a side effect so any
+    `build_graph().compile().ainvoke(...)` path is captured in LangSmith when
+    a key is present.
 
     Returns:
         The uncompiled `StateGraph`; the caller compiles it (optionally with a
@@ -51,10 +51,38 @@ def build_graph() -> StateGraph[AgentState]:
     configure_tracing()
 
     builder: StateGraph[AgentState] = StateGraph(AgentState)
-    builder.add_node("smoke_test_node", smoke_test_node)
-    builder.add_edge(START, "smoke_test_node")
-    builder.add_edge("smoke_test_node", END)
+    builder.add_node(GUARDRAIL, guardrail_node)
+    builder.add_node(GENERATE_RECIPE, generate_recipe_node)
+    builder.add_node(REFUSE, refuse_node)
+    builder.add_edge(START, GUARDRAIL)
+    builder.add_edge(GENERATE_RECIPE, END)
+    builder.add_edge(REFUSE, END)
     return builder
+
+
+def thread_config(thread_id: str) -> RunnableConfig:
+    """Build the run config that keys the checkpointer for one session.
+
+    Callers go through this rather than hand-writing the dict so a missing
+    `thread_id` fails loudly here. A run with no thread id looks like it
+    works and silently loses the conversation, which is far worse than an
+    exception at the call site.
+
+    Args:
+        thread_id: `str(chat_session.id)` for the session being run.
+
+    Returns:
+        The `configurable` run config to pass alongside the state.
+
+    Raises:
+        ValueError: `thread_id` is empty, so the run would not be persisted.
+    """
+    if not thread_id:
+        raise ValueError(
+            "Cannot run the agent without a thread_id: the turn would run "
+            "unpersisted and its history would be silently lost."
+        )
+    return {"configurable": {"thread_id": thread_id}}
 
 
 def _checkpointer_conn_string() -> str:
