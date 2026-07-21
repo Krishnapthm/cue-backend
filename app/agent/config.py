@@ -26,10 +26,12 @@ class AgentSettings(BaseSettings):
     )
 
     # Selects which langchain-core BaseChatModel `providers.get_chat_model`
-    # returns. Anthropic is the default until PRD Section 12 is settled.
-    MODEL_PROVIDER: Literal["openai", "anthropic"] = "anthropic"
-    # Required: the provider-specific model id (e.g. "claude-opus-4-8" or
-    # "gpt-4o"). No default - the deployment must state it explicitly.
+    # returns. PRD Section 12 is settled: OpenAI. Anthropic stays wired up so
+    # the seam is a live two-provider choice rather than a dead branch.
+    MODEL_PROVIDER: Literal["openai", "anthropic"] = "openai"
+    # Required: the provider-specific model id (e.g. "gpt-5.4" or
+    # "claude-opus-4-8"). No default - the deployment must state it
+    # explicitly, so a model swap is always a visible config change.
     MODEL_NAME: str
     # When true, runs are sent to LangSmith *if* a LANGSMITH_API_KEY is present;
     # a missing key degrades to a logged warning, never a hard failure.

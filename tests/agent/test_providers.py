@@ -30,10 +30,17 @@ def _settings(provider: Literal["openai", "anthropic"], model: str) -> AgentSett
 
 
 def test_openai_provider_returns_openai_chat_model() -> None:
-    model = get_chat_model(_settings("openai", "gpt-4o"))
+    model = get_chat_model(_settings("openai", "gpt-5.4"))
 
     assert isinstance(model, ChatOpenAI)
-    assert model.model_name == "gpt-4o"
+    assert model.model_name == "gpt-5.4"
+
+
+def test_openai_is_the_default_provider() -> None:
+    # PRD Section 12 is settled: a deployment that sets only AGENT_MODEL_NAME
+    # gets OpenAI. The model id itself stays required, so it is never implicit.
+    assert AgentSettings.model_fields["MODEL_PROVIDER"].default == "openai"
+    assert AgentSettings.model_fields["MODEL_NAME"].is_required()
 
 
 def test_anthropic_provider_returns_anthropic_chat_model() -> None:
@@ -46,7 +53,7 @@ def test_anthropic_provider_returns_anthropic_chat_model() -> None:
 def test_both_providers_share_the_base_chat_model_interface() -> None:
     # The graph and its nodes depend only on BaseChatModel, which is what keeps
     # the swap free of any change to graph.py.
-    openai_model = get_chat_model(_settings("openai", "gpt-4o"))
+    openai_model = get_chat_model(_settings("openai", "gpt-5.4"))
     anthropic_model = get_chat_model(_settings("anthropic", "claude-opus-4-8"))
 
     assert isinstance(openai_model, BaseChatModel)
