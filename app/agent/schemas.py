@@ -28,6 +28,30 @@ class GeneratedRecipe(BaseModel):
     method_summary: str
 
 
+class ScopeVerdict(StrEnum):
+    """Whether a user turn is something Cue is willing to act on."""
+
+    IN_SCOPE = "in_scope"
+    OUT_OF_SCOPE = "out_of_scope"
+
+
+class GuardrailDecision(BaseModel):
+    """The entry guardrail's classification of one user turn.
+
+    `verdict` is a closed enum on purpose: a classifier that returns free
+    text or an unrecognized label fails Pydantic validation and is handled
+    as a malformed response, rather than being coerced into "in scope".
+
+    `reason` is a short, model-controlled rationale kept for logs and traces
+    only. It is never rendered to the user - concatenating attacker-
+    influenced text into the reply would reintroduce the very injection
+    vector this node exists to close.
+    """
+
+    verdict: ScopeVerdict
+    reason: str
+
+
 class IngredientStatus(StrEnum):
     """Whether a normalized ingredient is already owned by the user."""
 
