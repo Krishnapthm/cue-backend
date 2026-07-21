@@ -60,6 +60,18 @@ class MessageResponse(BaseModel):
     created_at: datetime
 
 
+class MessageExchange(BaseModel):
+    """One conversational turn: what the user sent and what the agent replied.
+
+    `assistant_message` is `None` whenever the turn ran no agent - any kind
+    other than `text`, or any role other than `user`. That is a normal
+    outcome, not an error: those turns persist exactly as they always have.
+    """
+
+    user_message: MessageResponse
+    assistant_message: MessageResponse | None
+
+
 class SessionSummary(BaseModel):
     """A chat session as it appears in the Recents list (R8.1)."""
 
