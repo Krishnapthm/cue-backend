@@ -5,7 +5,9 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth.router import router as auth_router
 from app.chat.router import router as chat_router
 from app.config import Environment, settings
 from app.database import engine
@@ -40,8 +42,20 @@ app = FastAPI(
     else "/openapi.json",
 )
 
+# Native iOS/Android do not enforce CORS, but Expo's web target (react-native-web)
+# does, and it is the fastest loop for integration work. `CORS_ALLOW_ORIGINS`
+# defaults to empty, so an unconfigured deployment installs the middleware and
+# permits nothing rather than shipping wide open.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ALLOW_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
 register_exception_handlers(app)
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(providers_router)
 app.include_router(chat_router)
 app.include_router(orders_router)
