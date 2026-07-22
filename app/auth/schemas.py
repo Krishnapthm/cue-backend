@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FirebaseClaims(BaseModel):
@@ -14,3 +14,18 @@ class FirebaseClaims(BaseModel):
     email: str
     email_verified: bool = False
     name: str | None = None
+
+
+class UserResponse(BaseModel):
+    """The signed-in Cue user, as returned by `GET /auth/me`.
+
+    `firebase_uid` is deliberately omitted: the client already holds it, and
+    it is the identity this service authenticates on - there is no reason to
+    echo it back over the wire.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    display_name: str | None

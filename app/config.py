@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     DATABASE_URL: PostgresDsn
     ENVIRONMENT: Environment = Environment.LOCAL
 
+    # Browser origins allowed to call the API (Expo's web target in local dev).
+    # Defaults to empty so an unconfigured deployment is closed rather than
+    # open. Never a wildcard: the client sends a bearer token on every call,
+    # so the origin list is the only thing narrowing who may do that from a
+    # browser. Set as a JSON array, e.g.
+    # CORS_ALLOW_ORIGINS='["http://localhost:8081"]'.
+    CORS_ALLOW_ORIGINS: list[str] = []
+
     # Verify connections before handing them out of the pool. Supabase closes
     # idle connections server-side, so without this the first query after an
     # idle period fails.
