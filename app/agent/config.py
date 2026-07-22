@@ -11,11 +11,6 @@ class AgentSettings(BaseSettings):
 
     Model provider choice is an open decision (PRD Section 12) and must stay
     swappable via config alone - never hard-coded in the graph or its nodes.
-
-    `LANGSMITH_API_KEY` and the other `LANGSMITH_*`/`LANGCHAIN_*` env vars the
-    tracing SDK consumes are read directly by that SDK per its own convention,
-    so they are deliberately not re-declared here. `app.agent.observability`
-    bridges the two settings below onto those env vars at runtime.
     """
 
     model_config = SettingsConfigDict(
@@ -33,10 +28,6 @@ class AgentSettings(BaseSettings):
     # "claude-opus-4-8"). No default - the deployment must state it
     # explicitly, so a model swap is always a visible config change.
     MODEL_NAME: str
-    # When true, runs are sent to LangSmith *if* a LANGSMITH_API_KEY is present;
-    # a missing key degrades to a logged warning, never a hard failure.
-    LANGSMITH_TRACING: bool = True
-    LANGSMITH_PROJECT: str = "cue-agent"
 
     # Supabase project base URL, used to build recipe-photo object URLs (see
     # `app.agent.storage.SupabaseImageStore`). Optional so the app still

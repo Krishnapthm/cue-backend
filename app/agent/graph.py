@@ -11,7 +11,6 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.nodes.guardrail import guardrail_node, refuse_node
 from app.agent.nodes.recipe import generate_recipe_node
-from app.agent.observability import configure_tracing
 from app.agent.state import AgentState
 from app.config import settings
 
@@ -40,16 +39,15 @@ def build_graph() -> StateGraph[AgentState]:
     alongside it would run both branches. `parse_recipe_photo_node` and
     `normalize_ingredients_node` stay unwired - text input only, for now.
 
-    Tracing is configured as a side effect so any
-    `build_graph().compile().ainvoke(...)` path is captured in LangSmith when
-    a key is present.
+    LangSmith tracing is not configured here: LangGraph/LangChain trace
+    automatically once `LANGSMITH_TRACING`/`LANGSMITH_API_KEY`/`LANGSMITH_PROJECT`
+    are real process env vars (see `main.py`'s `load_dotenv()` call) - no
+    application code required.
 
     Returns:
         The uncompiled `StateGraph`; the caller compiles it (optionally with a
         checkpointer via `open_compiled_graph`).
     """
-    configure_tracing()
-
     builder: StateGraph[AgentState] = StateGraph(AgentState)
     builder.add_node(GUARDRAIL, guardrail_node)
     builder.add_node(GENERATE_RECIPE, generate_recipe_node)
