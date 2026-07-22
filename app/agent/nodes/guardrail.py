@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import Command
 from pydantic import ValidationError
 
@@ -153,3 +153,33 @@ async def guardrail_node(
     )
     logger.info("Guardrail verdict %s -> %s", decision.verdict.value, goto)
     return Command(update={"guardrail": decision}, goto=goto)
+
+
+REFUSAL_MESSAGE = (
+    "I can only help with cooking - tell me a dish, describe a meal you're "
+    "after, or list what's in your fridge, and I'll put together the "
+    "ingredients you need."
+)
+
+
+def refuse_node(state: AgentState) -> dict[str, Any]:
+    """Append a fixed, non-model refusal message.
+
+    Deterministic and template-based on purpose: the refusal path must not
+    make a second model call with attacker-influenced text in the prompt.
+    For the same reason the reply never quotes the user's message back, and
+    never renders `GuardrailDecision.reason` - both are attacker-controlled
+    strings, and echoing either would reopen the hole this path exists to
+    close.
+
+    `state["recipe"]` is deliberately left untouched: a refused turn must
+    not disturb whatever the session already had.
+
+    Args:
+        state: The current graph state. Read only for logging.
+
+    Returns:
+        A partial state update appending the refusal to the transcript.
+    """
+    logger.info("Refusing out-of-scope turn for session %s", state["session_id"])
+    return {"messages": [AIMessage(content=REFUSAL_MESSAGE)]}

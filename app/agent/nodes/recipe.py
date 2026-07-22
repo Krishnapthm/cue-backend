@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import (
+    AIMessage,
     HumanMessage,
     ImageContentBlock,
     SystemMessage,
@@ -16,7 +17,7 @@ from pydantic import ValidationError
 
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.providers import get_chat_model
-from app.agent.schemas import GeneratedRecipe
+from app.agent.schemas import GeneratedRecipe, RecipeIngredient
 from app.agent.state import AgentState
 from app.agent.storage import get_image_store
 
@@ -48,6 +49,47 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _render_ingredient(ingredient: RecipeIngredient) -> str:
+    """Render one ingredient line as `name - quantity unit`.
+
+    Quantity and unit are each optional, so the amount is only appended when
+    there is one. A whole-number quantity renders without a trailing `.0`,
+    since "2 clove" reads like a recipe and "2.0 clove" does not.
+    """
+    if ingredient.quantity is None:
+        return f"- {ingredient.name}"
+
+    quantity = ingredient.quantity
+    amount = f"{quantity:g}"
+    if ingredient.unit:
+        amount = f"{amount} {ingredient.unit}"
+    return f"- {ingredient.name} - {amount}"
+
+
+def render_recipe(recipe: GeneratedRecipe) -> str:
+    """Render a validated recipe as the assistant's chat reply.
+
+    Deterministic formatting of fields that already passed `GeneratedRecipe`
+    validation - deliberately not a second model call. The reply is the
+    ingredient list (the product's core output), with the method summary as
+    a closing line.
+
+    Args:
+        recipe: The structured recipe to render.
+
+    Returns:
+        Plain text suitable for an `AIMessage` body.
+    """
+    lines = [f"{recipe.dish_name} (about {recipe.estimated_time_minutes} minutes)", ""]
+    if recipe.ingredients:
+        lines.append("Ingredients:")
+        lines.extend(_render_ingredient(i) for i in recipe.ingredients)
+    else:
+        lines.append("No ingredients were identified for this dish.")
+    lines.extend(["", recipe.method_summary])
+    return "\n".join(lines)
+
+
 async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
     """Generate a structured recipe for the dish named in the latest message.
 
@@ -64,11 +106,13 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
             last one is treated as the user's dish-name intent.
 
     Returns:
-        A partial state update containing the generated `recipe`. This is a
-        partial dict rather than a full `AgentState` (LangGraph's node
-        convention, see `smoke_test_node` in `app/agent/graph.py`) - a
-        partial dict cannot satisfy the total `AgentState` TypedDict under
-        strict typing.
+        A partial state update containing the generated `recipe` and the
+        `AIMessage` rendering it for the transcript. The message is
+        deterministic formatting of already-validated fields, not a second
+        model call. This is a partial dict rather than a full `AgentState`
+        (LangGraph's node convention) - a partial dict cannot satisfy the
+        total `AgentState` TypedDict under strict typing. `messages` is
+        appended, not overwritten, by the `add_messages` reducer.
 
     Raises:
         ValueError: `state["messages"]` is empty, so there is no dish name to
@@ -112,7 +156,7 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
         # schema; this guards that contract defensively at runtime.
         raise RecipeGenerationError()
 
-    return {"recipe": recipe}
+    return {"recipe": recipe, "messages": [AIMessage(content=render_recipe(recipe))]}
 
 
 _PHOTO_SYSTEM_PROMPT = (
