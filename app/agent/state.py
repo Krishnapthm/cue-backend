@@ -5,7 +5,11 @@ from typing import Annotated, NotRequired, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
-from app.agent.schemas import GeneratedRecipe, NormalizedIngredient
+from app.agent.schemas import (
+    GeneratedRecipe,
+    GuardrailDecision,
+    NormalizedIngredient,
+)
 
 
 class AgentState(TypedDict):
@@ -41,12 +45,19 @@ class AgentState(TypedDict):
     same `GeneratedRecipe.ingredients` reshaped into `(name, quantity/unit,
     have/need)` rows. It is `NotRequired` because it only exists once that
     node has run.
+
+    `guardrail` is the entry guardrail's verdict for the current turn, kept
+    for logs and traces rather than for rendering - see `GuardrailDecision`
+    on why its `reason` never reaches the user. `NotRequired` for the same
+    reason as `recipe`: state literals built before the guardrail existed
+    stay valid without passing `guardrail=None`.
     """
 
     session_id: str
     user_id: int
     messages: Annotated[list[BaseMessage], add_messages]
     recipe: NotRequired[GeneratedRecipe | None]
+    guardrail: NotRequired[GuardrailDecision | None]
     image_object_path: NotRequired[str | None]
     have_marks: NotRequired[set[str]]
     normalized_ingredients: NotRequired[list[NormalizedIngredient]]
