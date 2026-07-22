@@ -6,8 +6,10 @@ from fastapi import APIRouter, status
 
 from app.auth.dependencies import CurrentUser
 from app.chat import service
+from app.chat.dependencies import AgentGraph
 from app.chat.schemas import (
     CreateMessageRequest,
+    MessageExchange,
     MessageResponse,
     SessionDetail,
     SessionSummary,
@@ -71,13 +73,16 @@ async def get(
 
 @router.post(
     "/{session_id}/messages",
-    response_model=MessageResponse,
+    response_model=MessageExchange,
     status_code=status.HTTP_201_CREATED,
-    summary="Append a message to a chat session's transcript",
+    summary="Append a message to a chat session and run the agent on it",
     responses={
         status.HTTP_404_NOT_FOUND: {"description": "Session not found"},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {
             "description": "Message body does not match its declared kind"
+        },
+        status.HTTP_502_BAD_GATEWAY: {
+            "description": "The agent could not produce a reply"
         },
     },
 )
@@ -86,12 +91,27 @@ async def add_message(
     request: CreateMessageRequest,
     user: CurrentUser,
     session: DbSession,
-) -> MessageResponse:
-    """Append a message and resurface the session at the top of Recents.
+    graph: AgentGraph,
+) -> MessageExchange:
+    """Append a message, run the agent on it, and return both sides of the turn.
+
+    Only a user's text turn reaches the agent; every other kind or role
+    persists exactly as before and comes back with `assistant_message=None`.
 
     Raises:
         ChatSessionNotFoundError: If `session_id` does not exist or belongs
-            to another user (both surface as 404).
+            to another user (both surface as 404, before any agent work).
+        RecipeGenerationError: If the agent could not produce a recipe
+            (surfaces as 502). The user's message stays persisted.
     """
-    message = await service.append_message(session, user.id, session_id, request)
-    return MessageResponse.model_validate(message)
+    user_message, assistant_message = await service.run_turn(
+        session, graph, user.id, session_id, request
+    )
+    return MessageExchange(
+        user_message=MessageResponse.model_validate(user_message),
+        assistant_message=(
+            MessageResponse.model_validate(assistant_message)
+            if assistant_message is not None
+            else None
+        ),
+    )
