@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import uuid
-from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -35,6 +38,18 @@ async def user(db_session: AsyncSession) -> User:
 
 
 @pytest_asyncio.fixture
+async def other_user(db_session: AsyncSession) -> User:
+    """A second Cue user, for cross-user authorization checks."""
+    new_user = User(
+        firebase_uid=f"firebase-uid-{uuid.uuid4()}", email="other@example.com"
+    )
+    db_session.add(new_user)
+    await db_session.commit()
+    await db_session.refresh(new_user)
+    return new_user
+
+
+@pytest_asyncio.fixture
 async def active_link(db_session: AsyncSession, user: User) -> ProviderLink:
     """An already-linked, active Swiggy provider link for `user`."""
     link = ProviderLink(
@@ -51,33 +66,63 @@ async def active_link(db_session: AsyncSession, user: User) -> ProviderLink:
     return link
 
 
+@dataclass
+class SwiggyTokenEndpointStub:
+    """Configurable stand-in for Swiggy's `/auth/token` endpoint.
+
+    Calling the stub configures the response (defaults to a successful
+    exchange); `requests` records every outbound request that reached it, so
+    tests can assert on what was actually sent to Swiggy.
+    """
+
+    status_code: int = int(httpx.codes.OK)
+    payload: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_TOKEN_PAYLOAD))
+    requests: list[httpx.Request] = field(default_factory=list)
+
+    def __call__(
+        self, *, status_code: int = int(httpx.codes.OK), **payload: Any
+    ) -> None:
+        self.status_code = status_code
+        self.payload = {**DEFAULT_TOKEN_PAYLOAD, **payload}
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(self.status_code, json=self.payload)
+
+    @property
+    def request_bodies(self) -> list[dict[str, Any]]:
+        """The JSON body of every request the stub received, in order."""
+        bodies: list[dict[str, Any]] = [
+            json.loads(request.content) for request in self.requests
+        ]
+        return bodies
+
+
 @pytest.fixture
 def mock_swiggy_token_endpoint(
     monkeypatch: pytest.MonkeyPatch,
-) -> Callable[..., None]:
+) -> SwiggyTokenEndpointStub:
     """Stub Swiggy's `/auth/token` endpoint so tests never hit the real internet.
 
-    Patches `app.providers.service._exchange_code` directly rather than the
-    global `httpx.AsyncClient`, so it never leaks into the ASGI test client's
+    Replaces `httpx` as bound in `app.providers.service` with a namespace whose
+    `AsyncClient` is wired to a `MockTransport`, so the real request-building
+    code still runs (and can be asserted on) while nothing leaves the process.
+    Scoped to that one module, so it never leaks into the ASGI test client's
     own HTTP calls against the app.
-
-    Returns a setter the test can call to configure the response; defaults to
-    a successful exchange.
     """
-    response_status: int = httpx.codes.OK
-    response_json = dict(DEFAULT_TOKEN_PAYLOAD)
+    stub = SwiggyTokenEndpointStub()
 
-    def _configure(*, status_code: int = httpx.codes.OK, **payload: object) -> None:
-        nonlocal response_status, response_json
-        response_status = status_code
-        response_json = {**DEFAULT_TOKEN_PAYLOAD, **payload}
+    class _MockTransportAsyncClient(httpx.AsyncClient):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(transport=httpx.MockTransport(stub.handle), **kwargs)
 
-    async def _fake_exchange_code(**kwargs: object) -> httpx.Response:
-        return httpx.Response(
-            response_status,
-            json=response_json,
-            request=httpx.Request("POST", "https://mcp.swiggy.com/auth/token"),
-        )
-
-    monkeypatch.setattr(service, "_exchange_code", _fake_exchange_code)
-    return _configure
+    monkeypatch.setattr(
+        service,
+        "httpx",
+        SimpleNamespace(
+            AsyncClient=_MockTransportAsyncClient,
+            HTTPError=httpx.HTTPError,
+            codes=httpx.codes,
+        ),
+    )
+    return stub

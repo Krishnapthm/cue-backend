@@ -11,9 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.provider import OAuthTransaction, ProviderLink
 from app.models.user import User
 from app.providers import service
+from app.providers.config import provider_settings
 from app.providers.constants import PROVIDER
 from app.providers.exceptions import InvalidOAuthStateError, SwiggyTokenExchangeError
 from app.providers.schemas import ProviderStatus
+from tests.providers.conftest import SwiggyTokenEndpointStub
 
 
 async def test_create_authorization_returns_a_swiggy_consent_url_with_pkce_params(
@@ -56,7 +58,9 @@ async def test_complete_authorization_links_the_provider_on_success(
     authorize_response = await service.create_authorization(db_session, user)
     state = parse_qs(urlparse(authorize_response.authorize_url).query)["state"][0]
 
-    await service.complete_authorization(db_session, state=state, code="auth-code")
+    await service.complete_authorization(
+        db_session, state=state, code="auth-code", user_id=user.id
+    )
 
     stmt = select(ProviderLink).where(
         ProviderLink.user_id == user.id, ProviderLink.provider == PROVIDER
@@ -75,10 +79,14 @@ async def test_complete_authorization_consumes_the_state_so_it_cannot_replay(
 ) -> None:
     authorize_response = await service.create_authorization(db_session, user)
     state = parse_qs(urlparse(authorize_response.authorize_url).query)["state"][0]
-    await service.complete_authorization(db_session, state=state, code="auth-code")
+    await service.complete_authorization(
+        db_session, state=state, code="auth-code", user_id=user.id
+    )
 
     with pytest.raises(InvalidOAuthStateError):
-        await service.complete_authorization(db_session, state=state, code="auth-code")
+        await service.complete_authorization(
+            db_session, state=state, code="auth-code", user_id=user.id
+        )
 
 
 async def test_complete_authorization_rejects_an_unknown_state(
@@ -86,7 +94,7 @@ async def test_complete_authorization_rejects_an_unknown_state(
 ) -> None:
     with pytest.raises(InvalidOAuthStateError):
         await service.complete_authorization(
-            db_session, state="never-issued", code="auth-code"
+            db_session, state="never-issued", code="auth-code", user_id=None
         )
 
 
@@ -107,7 +115,7 @@ async def test_complete_authorization_rejects_an_expired_state(
 
     with pytest.raises(InvalidOAuthStateError):
         await service.complete_authorization(
-            db_session, state="expired-state", code="auth-code"
+            db_session, state="expired-state", code="auth-code", user_id=user.id
         )
 
 
@@ -121,7 +129,9 @@ async def test_complete_authorization_raises_on_swiggy_token_exchange_failure(
     state = parse_qs(urlparse(authorize_response.authorize_url).query)["state"][0]
 
     with pytest.raises(SwiggyTokenExchangeError):
-        await service.complete_authorization(db_session, state=state, code="auth-code")
+        await service.complete_authorization(
+            db_session, state=state, code="auth-code", user_id=user.id
+        )
 
 
 async def test_complete_authorization_upserts_on_relink_after_expiry(
@@ -132,11 +142,15 @@ async def test_complete_authorization_upserts_on_relink_after_expiry(
     """A second successful link for the same user replaces the row in place."""
     first = await service.create_authorization(db_session, user)
     first_state = parse_qs(urlparse(first.authorize_url).query)["state"][0]
-    await service.complete_authorization(db_session, state=first_state, code="code-1")
+    await service.complete_authorization(
+        db_session, state=first_state, code="code-1", user_id=user.id
+    )
 
     second = await service.create_authorization(db_session, user)
     second_state = parse_qs(urlparse(second.authorize_url).query)["state"][0]
-    await service.complete_authorization(db_session, state=second_state, code="code-2")
+    await service.complete_authorization(
+        db_session, state=second_state, code="code-2", user_id=user.id
+    )
 
     stmt = select(ProviderLink).where(
         ProviderLink.user_id == user.id, ProviderLink.provider == PROVIDER
@@ -145,6 +159,57 @@ async def test_complete_authorization_upserts_on_relink_after_expiry(
     links = result.scalars().all()
     assert len(links) == 1
     assert links[0].status == "active"
+
+
+async def test_create_authorization_returns_the_configured_redirect_uri(
+    db_session: AsyncSession, user: User
+) -> None:
+    response = await service.create_authorization(db_session, user)
+
+    assert response.redirect_uri == provider_settings.REDIRECT_URI
+    query = parse_qs(urlparse(response.authorize_url).query)
+    assert query["redirect_uri"] == [response.redirect_uri]
+
+
+async def test_complete_authorization_rejects_a_state_owned_by_another_user(
+    db_session: AsyncSession,
+    user: User,
+    other_user: User,
+    mock_swiggy_token_endpoint: SwiggyTokenEndpointStub,
+) -> None:
+    """A signed-in user cannot redeem a state another Cue user's flow issued."""
+    authorize_response = await service.create_authorization(db_session, user)
+    state = parse_qs(urlparse(authorize_response.authorize_url).query)["state"][0]
+
+    with pytest.raises(InvalidOAuthStateError):
+        await service.complete_authorization(
+            db_session, state=state, code="auth-code", user_id=other_user.id
+        )
+
+    assert mock_swiggy_token_endpoint.requests == []
+    assert await service.get_link(db_session, user.id) is None
+    assert await service.get_link(db_session, other_user.id) is None
+
+
+async def test_complete_authorization_replays_the_persisted_redirect_uri(
+    db_session: AsyncSession,
+    user: User,
+    mock_swiggy_token_endpoint: SwiggyTokenEndpointStub,
+) -> None:
+    """Swiggy requires the token call's redirect_uri to match the authorize call."""
+    authorize_response = await service.create_authorization(db_session, user)
+    state = parse_qs(urlparse(authorize_response.authorize_url).query)["state"][0]
+    txn = await db_session.get(OAuthTransaction, state)
+    assert txn is not None
+
+    await service.complete_authorization(
+        db_session, state=state, code="auth-code", user_id=user.id
+    )
+
+    body = mock_swiggy_token_endpoint.request_bodies[0]
+    assert body["redirect_uri"] == txn.redirect_uri
+    assert body["grant_type"] == "authorization_code"
+    assert body["code"] == "auth-code"
 
 
 async def test_get_link_returns_none_when_not_linked(
