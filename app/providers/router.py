@@ -12,7 +12,7 @@ from app.providers.exceptions import (
     ProviderNotConfiguredError,
     SwiggyTokenExchangeError,
 )
-from app.providers.schemas import AuthorizeResponse, StatusResponse
+from app.providers.schemas import AuthorizeResponse, CallbackRequest, StatusResponse
 
 router = APIRouter(prefix="/providers/swiggy", tags=["providers"])
 
@@ -61,11 +61,54 @@ async def callback(
         return RedirectResponse(f"{deep_link}?swiggy_link=error")
 
     try:
-        await service.complete_authorization(session, state=state, code=code)
+        # user_id=None: Swiggy calls this redirect target from the user's
+        # browser with no bearer token, so there is no authenticated user to
+        # check the transaction against. POST /callback below does check.
+        await service.complete_authorization(
+            session, state=state, code=code, user_id=None
+        )
     except (InvalidOAuthStateError, SwiggyTokenExchangeError):
         return RedirectResponse(f"{deep_link}?swiggy_link=error")
 
     return RedirectResponse(f"{deep_link}?swiggy_link=success")
+
+
+@router.post(
+    "/callback",
+    response_model=StatusResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Complete the Swiggy link from an intercepted redirect",
+    responses={
+        status.HTTP_400_BAD_REQUEST: {
+            "description": "Unknown, expired, already-used state, or a state "
+            "belonging to another Cue user"
+        },
+        status.HTTP_502_BAD_GATEWAY: {
+            "description": "Swiggy rejected or failed the code exchange"
+        },
+    },
+)
+async def submit_callback(
+    request: CallbackRequest, user: CurrentUser, session: DbSession
+) -> StatusResponse:
+    """Link Swiggy from a `code`/`state` pair the client intercepted (CUE-63).
+
+    The registered redirect URI is `http://localhost:8000/...`, which on a
+    physical device resolves to the phone, so `GET /callback` never reaches
+    this server. The client runs consent in a WebView, cancels the navigation
+    to the redirect URI, and posts the `code`/`state` here over its normal
+    authenticated API connection instead.
+
+    Raises:
+        InvalidOAuthStateError: If `state` is unknown, expired, already used,
+            or belongs to a different Cue user (400).
+        SwiggyTokenExchangeError: If Swiggy rejects or fails the exchange (502).
+    """
+    await service.complete_authorization(
+        session, state=request.state, code=request.code, user_id=user.id
+    )
+    link_status = await service.get_link_status(session, user.id)
+    return StatusResponse(status=link_status)
 
 
 @router.get(

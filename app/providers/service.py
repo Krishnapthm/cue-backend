@@ -113,7 +113,10 @@ async def create_authorization(session: AsyncSession, user: User) -> AuthorizeRe
             "scope": SWIGGY_SCOPE,
         }
     )
-    return AuthorizeResponse(authorize_url=f"{SWIGGY_AUTHORIZE_URL}?{query}")
+    return AuthorizeResponse(
+        authorize_url=f"{SWIGGY_AUTHORIZE_URL}?{query}",
+        redirect_uri=redirect_uri,
+    )
 
 
 async def _exchange_code(
@@ -133,7 +136,7 @@ async def _exchange_code(
 
 
 async def complete_authorization(
-    session: AsyncSession, *, state: str, code: str
+    session: AsyncSession, *, state: str, code: str, user_id: int | None
 ) -> None:
     """Exchange a Swiggy authorization code for an access token and link it (R2.1).
 
@@ -143,9 +146,16 @@ async def complete_authorization(
             transaction this same backend created, which is the CSRF check:
             an attacker cannot guess an unconsumed, unexpired state value.
         code: The single-use authorization code Swiggy issued.
+        user_id: The authenticated Cue user completing the flow. The
+            transaction must belong to them, otherwise any signed-in user who
+            got hold of a `state` could bind a Swiggy account onto whichever
+            Cue user opened the flow. Required, but explicitly `None` for the
+            unauthenticated `GET /callback` redirect target, which Swiggy
+            itself calls with no bearer token and so cannot check ownership.
 
     Raises:
-        InvalidOAuthStateError: If `state` is unknown, expired, or already used.
+        InvalidOAuthStateError: If `state` is unknown, expired, already used,
+            or belongs to a different Cue user.
         SwiggyTokenExchangeError: If Swiggy rejects or fails the code exchange.
     """
     now = datetime.now(UTC)
@@ -155,6 +165,7 @@ async def complete_authorization(
         or txn.provider != PROVIDER
         or txn.consumed_at is not None
         or txn.expires_at < now
+        or (user_id is not None and txn.user_id != user_id)
     ):
         logger.warning("Rejected Swiggy OAuth callback with invalid state")
         raise InvalidOAuthStateError
@@ -203,7 +214,14 @@ async def complete_authorization(
             "linked_at": insert_stmt.excluded.linked_at,
         },
     )
-    await session.execute(upsert_stmt)
+    # `populate_existing` refreshes any ProviderLink already loaded in this
+    # session's identity map: a Core-level upsert would otherwise leave a
+    # previously read row (e.g. one this same request saw as `expired`) stale,
+    # so a follow-up read would report the pre-link state.
+    await session.execute(
+        upsert_stmt.returning(ProviderLink),
+        execution_options={"populate_existing": True},
+    )
     txn.consumed_at = now
     await session.commit()
 
