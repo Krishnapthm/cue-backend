@@ -16,3 +16,6 @@ wheels/
 
 # Claude Code: transient agent worktrees (never commit these)
 .claude/worktrees/
+
+scratchpad.txt
+
