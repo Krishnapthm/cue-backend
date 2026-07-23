@@ -1,4 +1,4 @@
-"""Order tracking API endpoints (CUE-14)."""
+"""Order history and tracking API endpoints (CUE-14, CUE-41/CUE-42)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,50 @@ from fastapi import APIRouter, status
 from app.auth.dependencies import CurrentUser
 from app.database import DbSession
 from app.orders import service
-from app.orders.schemas import TrackingResponse
+from app.orders.schemas import OrderDetailsResponse, OrderListItem, TrackingResponse
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+
+@router.get(
+    "",
+    response_model=list[OrderListItem],
+    status_code=status.HTTP_200_OK,
+    summary="The user's recent Instamart orders",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "description": "Not authenticated, or Swiggy session expired."
+        },
+    },
+)
+async def list_orders(user: CurrentUser, session: DbSession) -> list[OrderListItem]:
+    """Return recent orders, newest first, for the Orders list (R10.1).
+
+    An empty list is a normal result, not an error - it is exactly what the
+    Orders-empty frame renders.
+    """
+    return await service.list_orders(session, user.id)
+
+
+@router.get(
+    "/{order_id}",
+    response_model=OrderDetailsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Line items and bill breakdown for one order",
+    responses={
+        status.HTTP_401_UNAUTHORIZED: {
+            "description": "Not authenticated, or Swiggy session expired."
+        },
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "description": "No such order, or it is not the caller's."
+        },
+    },
+)
+async def get_order(
+    order_id: str, user: CurrentUser, session: DbSession
+) -> OrderDetailsResponse:
+    """Return one order's line items and bill breakdown (R10.2)."""
+    return await service.get_order(session, user.id, order_id)
 
 
 @router.get(
