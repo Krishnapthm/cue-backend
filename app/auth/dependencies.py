@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Header
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.auth import service
@@ -11,17 +12,23 @@ from app.auth.schemas import FirebaseClaims
 from app.database import DbSession
 from app.models.user import User
 
+# Declares a bearer-token security scheme in the OpenAPI schema, which renders
+# the "Authorize" button in Swagger UI. auto_error=False keeps our own
+# InvalidTokenError (401) instead of HTTPBearer's default 403 on a missing header.
+bearer_scheme = HTTPBearer(auto_error=False)
 
-async def bearer_token(authorization: Annotated[str | None, Header()] = None) -> str:
+
+async def bearer_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> str:
     """Extract the raw JWT from the `Authorization: Bearer <token>` header."""
-    if authorization is None:
+    if credentials is None:
         raise InvalidTokenError("Missing Authorization header.")
 
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
+    if credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise InvalidTokenError("Authorization header must be a Bearer token.")
 
-    return token
+    return credentials.credentials
 
 
 async def verified_claims(
