@@ -14,12 +14,30 @@ import time
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.instamart import service as instamart_service
+from app.instamart.schemas import OrderSummary
 from app.orders.constants import MIN_POLL_INTERVAL_SECONDS
-from app.orders.schemas import TrackingResponse, TrackingStatus
+from app.orders.schemas import (
+    OrderDetailsResponse,
+    OrderLineItem,
+    OrderListItem,
+    OrderStatus,
+    TrackingResponse,
+    TrackingStatus,
+)
 
 # Raw Swiggy status tokens (lowercased) that indicate a terminal, delivered
 # order. Matched case-insensitively against `OrderTracking.status`.
 _DELIVERED_STATUS_TOKENS = frozenset({"delivered", "completed", "order_delivered"})
+
+# Raw tokens for an order that is terminal but never arrived.
+_CANCELLED_STATUS_TOKENS = frozenset({"cancelled", "canceled", "refunded", "failed"})
+
+# Raw tokens for an order that has left the store. Checked before the
+# preparing fallback so the Orders list and the tracking screen can label the
+# two live stages apart instead of collapsing them into one "active".
+_OUT_FOR_DELIVERY_STATUS_TOKENS = frozenset(
+    {"out_for_delivery", "out for delivery", "dispatched", "shipped", "on_the_way"}
+)
 
 # Process-local cache: (user_id, order_id) -> (last_live_call_monotonic, response).
 # This is NOT shared across instances - in a multi-instance deployment the
@@ -53,6 +71,107 @@ def _map_status(raw: str) -> TrackingStatus:
     if any(token in normalized for token in _DELIVERED_STATUS_TOKENS):
         return TrackingStatus.DELIVERED
     return TrackingStatus.ACTIVE
+
+
+def _map_order_status(raw: str) -> OrderStatus:
+    """Map Swiggy's raw status string onto the closed `OrderStatus` set.
+
+    Checked most-specific first: cancelled and delivered are terminal and
+    must never be mistaken for a live order, then out-for-delivery, then
+    everything else falls back to `PREPARING`.
+
+    The fallback direction is deliberate and matches `_map_status`: an
+    unrecognized status is far more likely to be a stage of a live order
+    than a terminal one, and guessing "live" only costs a tracking screen
+    that shows an early stage, whereas guessing "terminal" would strand a
+    real in-flight order on a static detail page with no way to track it.
+    """
+    normalized = raw.lower()
+    for tokens, status in (
+        (_CANCELLED_STATUS_TOKENS, OrderStatus.CANCELLED),
+        (_DELIVERED_STATUS_TOKENS, OrderStatus.DELIVERED),
+        (_OUT_FOR_DELIVERY_STATUS_TOKENS, OrderStatus.OUT_FOR_DELIVERY),
+    ):
+        if any(token in normalized for token in tokens):
+            return status
+    return OrderStatus.PREPARING
+
+
+def _item_names(summary: OrderSummary) -> list[str]:
+    """Best-effort product names off `get_orders`' untyped `items` dicts.
+
+    Swiggy doesn't pin the key, so try the plausible spellings per entry and
+    drop entries that carry no usable name at all rather than emitting a
+    blank row into the list frame's item summary.
+    """
+    names: list[str] = []
+    for item in summary.items:
+        if not isinstance(item, dict):
+            continue
+        for key in ("productName", "product_name", "name", "displayName"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                names.append(value.strip())
+                break
+    return names
+
+
+async def list_orders(session: AsyncSession, user_id: int) -> list[OrderListItem]:
+    """Return the user's recent Instamart orders, newest first (R10.1).
+
+    A thin projection over `instamart_service.get_orders`: it maps the raw
+    status onto the closed `OrderStatus` set and flattens each order's items
+    down to product names, which is all the Orders list frame renders.
+    Ordering is Swiggy's own - the tool returns recent orders first and there
+    is no reliable timestamp to re-sort on.
+
+    Raises:
+        InstamartAuthError: Not linked, or the link is expired (propagates
+            uncaught; the global `AppError` handler maps it to 401).
+    """
+    summaries = await instamart_service.get_orders(session, user_id)
+    return [
+        OrderListItem(
+            order_id=summary.order_id,
+            status=_map_order_status(summary.status),
+            placed_at=summary.placed_at,
+            items=_item_names(summary),
+            total=summary.total,
+        )
+        for summary in summaries
+    ]
+
+
+async def get_order(
+    session: AsyncSession, user_id: int, order_id: str
+) -> OrderDetailsResponse:
+    """Return one order's line items and bill breakdown (R10.2).
+
+    Raises:
+        InstamartAuthError: Not linked, or the link is expired (-> 401).
+        InstamartDomainError: Swiggy reported `success: false` for this order
+            - it doesn't exist, or belongs to another user. Propagates
+            uncaught so the global handler maps it to 422 rather than a raw
+            500; the app renders its error state off that.
+    """
+    details = await instamart_service.get_order_details(session, user_id, order_id)
+    return OrderDetailsResponse(
+        order_id=details.order_id,
+        status=_map_order_status(details.status),
+        placed_at=details.placed_at,
+        items=[
+            OrderLineItem(
+                product_name=item.product_name,
+                quantity=item.quantity,
+                price=item.price,
+            )
+            for item in details.items
+        ],
+        item_total=details.item_total,
+        delivery_fee=details.delivery_fee,
+        handling_fee=details.handling_fee,
+        grand_total=details.grand_total,
+    )
 
 
 async def get_tracking(

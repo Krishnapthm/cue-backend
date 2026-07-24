@@ -17,7 +17,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class AddressCategory(StrEnum):
@@ -168,6 +168,12 @@ class OrderSummary(BaseModel):
     `get_orders` is the single source for both. `items`/`address` are
     tool-specific and not further typed until a screen needs more than
     passthrough display.
+
+    `placed_at` and `total` are the two fields the Order-History list frame
+    needs beyond id/status. Swiggy's docs don't pin either field's name for
+    get_orders, so both accept the plausible spellings and stay optional -
+    a payload carrying neither still validates, and the list renders without
+    them rather than failing the whole request.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -176,6 +182,16 @@ class OrderSummary(BaseModel):
     status: str
     items: list[dict[str, Any]] = Field(default_factory=list)
     address: dict[str, Any] | None = None
+    placed_at: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "placed_at", "placedAt", "orderedTime", "orderTime", "createdAt"
+        ),
+    )
+    total: Decimal | None = Field(
+        default=None,
+        validation_alias=AliasChoices("total", "grandTotal", "orderTotal"),
+    )
 
 
 class OrderLineItem(BaseModel):
@@ -196,6 +212,14 @@ class OrderDetails(BaseModel):
     order_id: str = Field(alias="orderId")
     status: str
     items: list[OrderLineItem]
+    # Same defensive, optional parse as OrderSummary.placed_at - the detail
+    # frame titles the screen with the order's date.
+    placed_at: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "placed_at", "placedAt", "orderedTime", "orderTime", "createdAt"
+        ),
+    )
     item_total: Decimal | None = Field(default=None, alias="itemTotal")
     delivery_fee: Decimal | None = Field(default=None, alias="deliveryFee")
     handling_fee: Decimal | None = Field(default=None, alias="handlingFee")

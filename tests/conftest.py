@@ -10,6 +10,7 @@ database.
 
 from __future__ import annotations
 
+import json
 import os
 
 from cryptography.fernet import Fernet
@@ -114,10 +115,16 @@ class InstamartToolCallStub:
         default_factory=lambda: {
             "jsonrpc": "2.0",
             "id": 1,
-            "result": {"success": True, "data": {}},
+            "result": {"structuredContent": {}},
         }
     )
     raises: Exception | None = None
+    # Response encoding. Swiggy answers `application/json` in practice, but
+    # MCP permits SSE, so both are stubbable.
+    content_type: str = "application/json"
+    # Set to answer with a body that isn't the JSON encoding of `json_body`
+    # (an SSE frame, or something undecodable).
+    raw_body: str | None = None
     # Per-tool-name overrides of the default (status_code, response), for
     # tests exercising a flow that calls more than one tool (e.g. get_cart
     # then checkout) where each call needs a different outcome.
@@ -138,6 +145,18 @@ class InstamartToolCallStub:
         elif result is not None:
             self.json_body = {"jsonrpc": "2.0", "id": 1, "result": result}
         self.raises = raises
+
+    def configure_sse(self, *, result: dict[str, Any]) -> None:
+        """Answer with the same envelope encoded as a text/event-stream body."""
+        self.status_code = 200
+        self.json_body = {"jsonrpc": "2.0", "id": 1, "result": result}
+        self.content_type = "text/event-stream"
+        self.raw_body = f"event: message\ndata: {json.dumps(self.json_body)}\n\n"
+
+    def configure_raw_body(self, body: str, *, status_code: int = 200) -> None:
+        """Answer 200 with a body that is not a JSON-RPC envelope at all."""
+        self.status_code = status_code
+        self.raw_body = body
 
     def configure_tool_result(
         self, tool_name: str, result: dict[str, Any], *, status_code: int = 200
@@ -178,8 +197,20 @@ def mock_instamart_tool_call(
         def __init__(self, status_code: int, json_body: dict[str, Any]) -> None:
             self.status_code = status_code
             self._json_body = json_body
+            # The client branches on content-type to pick a decoder, so the
+            # stub has to carry a real headers mapping.
+            self.headers = {"content-type": stub.content_type}
+
+        @property
+        def text(self) -> str:
+            if stub.raw_body is not None:
+                return stub.raw_body
+            return json.dumps(self._json_body)
 
         def json(self) -> dict[str, Any]:
+            if stub.raw_body is not None:
+                decoded: dict[str, Any] = json.loads(stub.raw_body)
+                return decoded
             return self._json_body
 
     class _FakeAsyncClient:

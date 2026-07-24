@@ -36,6 +36,12 @@ REQUEST_TIMEOUT_SECONDS = 10.0
 # authorize (R2.5). Matches app.providers.constants.RECOVERABLE_PROVIDER_STATUS_CODES.
 AUTH_FAILURE_STATUS_CODES = frozenset({401, 419})
 
+# MCP streamable-HTTP requires the client to accept *both* content types on
+# every POST; sending only the implicit `*/*` gets the request rejected with
+# HTTP 406 before the tool ever runs. The server picks one per response - in
+# practice `application/json` - so replies must be parsed for either.
+MCP_ACCEPT_HEADER = "application/json, text/event-stream"
+
 # JSON-RPC error code documented for auth failure at the protocol level,
 # distinct from an HTTP 401 (errors reference: "-32001").
 JSONRPC_AUTH_ERROR_CODE = -32001

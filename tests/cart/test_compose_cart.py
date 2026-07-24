@@ -46,7 +46,7 @@ async def test_compose_cart_persists_the_plan_and_its_items(
     chat_session: ChatSession,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_CART})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_CART})
 
     result = await compose_cart(
         db_session, linked_user.id, chat_session.id, "addr-1", [_variant()]
@@ -77,7 +77,7 @@ async def test_compose_cart_writes_the_full_cart_and_reads_it_back(
     chat_session: ChatSession,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_CART})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_CART})
 
     result = await compose_cart(
         db_session, linked_user.id, chat_session.id, "addr-1", [_variant()]
@@ -124,7 +124,7 @@ async def test_compose_cart_excludes_unavailable_ingredients_from_the_cart_write
     chat_session: ChatSession,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_CART})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_CART})
     unavailable = _variant(
         "cardamom",
         spin_id=None,
@@ -154,7 +154,7 @@ async def test_compose_cart_supersedes_the_previous_live_plan_on_recompose(
     chat_session: ChatSession,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_CART})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_CART})
 
     first = await compose_cart(
         db_session, linked_user.id, chat_session.id, "addr-1", [_variant()]
