@@ -90,7 +90,7 @@ async def test_list_orders_projects_status_names_and_total(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"orders": RAW_ORDERS}}
+        result={"structuredContent": {"orders": RAW_ORDERS}}
     )
 
     orders = await service.list_orders(db_session, linked_user.id)
@@ -113,8 +113,7 @@ async def test_list_orders_drops_items_carrying_no_usable_name(
     item summary."""
     mock_instamart_tool_call.configure(
         result={
-            "success": True,
-            "data": {
+            "structuredContent": {
                 "orders": [
                     {
                         "orderId": "order-c",
@@ -144,8 +143,9 @@ async def test_list_orders_tolerates_an_order_missing_date_and_total(
     still has to render a row rather than fail the whole list."""
     mock_instamart_tool_call.configure(
         result={
-            "success": True,
-            "data": {"orders": [{"orderId": "order-d", "status": "DELIVERED"}]},
+            "structuredContent": {
+                "orders": [{"orderId": "order-d", "status": "DELIVERED"}]
+            },
         }
     )
 
@@ -176,7 +176,7 @@ async def test_list_orders_returns_rows(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"orders": RAW_ORDERS}}
+        result={"structuredContent": {"orders": RAW_ORDERS}}
     )
 
     response = await authed_client.get("/orders")
@@ -194,7 +194,7 @@ async def test_list_orders_returns_an_empty_list_not_an_error(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     """No orders is the Orders-empty frame, not a failure."""
-    mock_instamart_tool_call.configure(result={"success": True, "data": {"orders": []}})
+    mock_instamart_tool_call.configure(result={"structuredContent": {"orders": []}})
 
     response = await authed_client.get("/orders")
 
@@ -207,7 +207,7 @@ async def test_get_order_returns_line_items_and_bill(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"order": RAW_ORDER_DETAILS}}
+        result={"structuredContent": {"order": RAW_ORDER_DETAILS}}
     )
 
     response = await authed_client.get("/orders/order-b")
@@ -233,7 +233,7 @@ async def test_get_order_surfaces_an_unknown_order_as_422(
     """Deep-linking to an order that isn't the caller's must reach the app as
     a 422 it can render an error state from, not a raw 500."""
     mock_instamart_tool_call.configure(
-        result={"success": False, "error": {"message": "no such order"}}
+        result={"isError": True, "content": [{"type": "text", "text": "no such order"}]}
     )
 
     response = await authed_client.get("/orders/order-zzz")

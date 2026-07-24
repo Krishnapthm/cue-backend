@@ -22,7 +22,7 @@ async def test_checkout_sends_the_selected_address_id(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"orderId": "order-1", "total": "150.00"}}
+        result={"structuredContent": {"orderId": "order-1", "total": "150.00"}}
     )
 
     await service.checkout(db_session, linked_user.id, address_id="addr-1")
@@ -40,7 +40,7 @@ async def test_checkout_parses_the_order_reference(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"orderId": "order-1", "total": "150.00"}}
+        result={"structuredContent": {"orderId": "order-1", "total": "150.00"}}
     )
 
     result = await service.checkout(db_session, linked_user.id, address_id="addr-1")
@@ -78,7 +78,7 @@ async def test_get_orders_sends_the_documented_count_parameter(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": {"orders": []}})
+    mock_instamart_tool_call.configure(result={"structuredContent": {"orders": []}})
 
     await service.get_orders(db_session, linked_user.id, count=5)
 
@@ -96,8 +96,7 @@ async def test_get_orders_parses_a_nested_list(
 ) -> None:
     mock_instamart_tool_call.configure(
         result={
-            "success": True,
-            "data": {
+            "structuredContent": {
                 "orders": [
                     {
                         "orderId": "order-1",
@@ -138,7 +137,7 @@ async def test_get_orders_clamps_count_above_the_documented_maximum(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": {"orders": []}})
+    mock_instamart_tool_call.configure(result={"structuredContent": {"orders": []}})
 
     await service.get_orders(db_session, linked_user.id, count=50)
 
@@ -151,7 +150,7 @@ async def test_get_orders_default_call_sends_instamart_order_type(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": {"orders": []}})
+    mock_instamart_tool_call.configure(result={"structuredContent": {"orders": []}})
 
     await service.get_orders(db_session, linked_user.id)
 
@@ -167,8 +166,7 @@ async def test_get_order_details_sends_the_order_id_and_parses_line_items(
 ) -> None:
     mock_instamart_tool_call.configure(
         result={
-            "success": True,
-            "data": {
+            "structuredContent": {
                 "order": {
                     "orderId": "order-1",
                     "status": "delivered",
@@ -208,7 +206,10 @@ async def test_get_order_details_raises_domain_error_on_success_false(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": False, "error": {"message": "Order not found"}}
+        result={
+            "isError": True,
+            "content": [{"type": "text", "text": "Order not found"}],
+        }
     )
 
     with pytest.raises(InstamartDomainError):

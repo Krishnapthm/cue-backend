@@ -22,7 +22,7 @@ async def test_track_returns_status_eta_and_delivery_location(
     authed_client: httpx.AsyncClient,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_TRACKING})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_TRACKING})
 
     response = await authed_client.get(
         "/orders/order-1/track", params={"lat": 1.0, "lng": 2.0}
@@ -41,7 +41,10 @@ async def test_track_surfaces_swiggy_domain_failure_as_422(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": False, "error": {"message": "not this user's order"}}
+        result={
+            "isError": True,
+            "content": [{"type": "text", "text": "not this user's order"}],
+        }
     )
 
     response = await authed_client.get(

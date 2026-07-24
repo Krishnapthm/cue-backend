@@ -30,13 +30,12 @@ async def test_place_order_places_a_cod_order_on_success(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure_tool_result(
-        "get_cart", {"success": True, "data": NON_EMPTY_CART}
+        "get_cart", {"structuredContent": NON_EMPTY_CART}
     )
     mock_instamart_tool_call.configure_tool_result(
         "checkout",
         {
-            "success": True,
-            "data": {"orderId": "swiggy-order-1", "total": "120.00"},
+            "structuredContent": {"orderId": "swiggy-order-1", "total": "120.00"},
         },
     )
 
@@ -59,7 +58,7 @@ async def test_place_order_raises_when_the_server_cart_is_empty(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure_tool_result(
-        "get_cart", {"success": True, "data": EMPTY_CART}
+        "get_cart", {"structuredContent": EMPTY_CART}
     )
 
     with pytest.raises(CartNotCheckoutableError):
@@ -82,7 +81,7 @@ async def test_place_order_raises_when_another_checkout_is_already_in_progress(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure_tool_result(
-        "get_cart", {"success": True, "data": NON_EMPTY_CART}
+        "get_cart", {"structuredContent": NON_EMPTY_CART}
     )
     db_session.add(
         Order(
@@ -109,14 +108,15 @@ async def test_place_order_marks_unknown_and_checks_get_orders_on_transport_fail
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure_tool_result(
-        "get_cart", {"success": True, "data": NON_EMPTY_CART}
+        "get_cart", {"structuredContent": NON_EMPTY_CART}
     )
     mock_instamart_tool_call.configure_tool_status("checkout", 503)
     mock_instamart_tool_call.configure_tool_result(
         "get_orders",
         {
-            "success": True,
-            "data": {"orders": [{"orderId": "swiggy-order-1", "status": "placed"}]},
+            "structuredContent": {
+                "orders": [{"orderId": "swiggy-order-1", "status": "placed"}]
+            },
         },
     )
 
@@ -146,10 +146,11 @@ async def test_place_order_marks_failed_on_a_domain_error(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure_tool_result(
-        "get_cart", {"success": True, "data": NON_EMPTY_CART}
+        "get_cart", {"structuredContent": NON_EMPTY_CART}
     )
     mock_instamart_tool_call.configure_tool_result(
-        "checkout", {"success": False, "error": {"message": "Store closed"}}
+        "checkout",
+        {"isError": True, "content": [{"type": "text", "text": "Store closed"}]},
     )
 
     order, recent_orders = await place_order(
@@ -168,11 +169,13 @@ async def test_place_order_marks_unknown_when_checkout_succeeds_without_an_order
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure_tool_result(
-        "get_cart", {"success": True, "data": NON_EMPTY_CART}
+        "get_cart", {"structuredContent": NON_EMPTY_CART}
     )
-    mock_instamart_tool_call.configure_tool_result("checkout", {"success": True})
     mock_instamart_tool_call.configure_tool_result(
-        "get_orders", {"success": True, "data": {"orders": []}}
+        "checkout", {"structuredContent": {}}
+    )
+    mock_instamart_tool_call.configure_tool_result(
+        "get_orders", {"structuredContent": {"orders": []}}
     )
 
     order, recent_orders = await place_order(

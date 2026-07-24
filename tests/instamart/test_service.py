@@ -33,7 +33,7 @@ async def test_get_addresses_parses_a_nested_list(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"addresses": [RAW_ADDRESS]}}
+        result={"structuredContent": {"addresses": [RAW_ADDRESS]}}
     )
 
     addresses = await service.get_addresses(db_session, linked_user.id)
@@ -48,7 +48,7 @@ async def test_get_addresses_accepts_a_bare_list_payload(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": [RAW_ADDRESS]})
+    mock_instamart_tool_call.configure(result={"structuredContent": [RAW_ADDRESS]})
 
     addresses = await service.get_addresses(db_session, linked_user.id)
 
@@ -87,7 +87,7 @@ async def test_create_address_sends_documented_camelcase_arguments(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_ADDRESS})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_ADDRESS})
     request = CreateAddressRequest(
         full_address="221B Baker Street, London",
         address_line="221B Baker Street",
@@ -115,7 +115,7 @@ async def test_delete_address_calls_the_tool_with_address_id(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": {}})
+    mock_instamart_tool_call.configure(result={"structuredContent": {}})
 
     await service.delete_address(db_session, linked_user.id, "addr-1")
 
@@ -142,9 +142,7 @@ async def test_search_products_scopes_the_call_to_the_selected_address(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"products": []}}
-    )
+    mock_instamart_tool_call.configure(result={"structuredContent": {"products": []}})
 
     await service.search_products(
         db_session, linked_user.id, address_id="addr-1", query="milk"
@@ -163,7 +161,7 @@ async def test_search_products_parses_candidates_with_variant_level_fields(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"products": [RAW_PRODUCT]}}
+        result={"structuredContent": {"products": [RAW_PRODUCT]}}
     )
 
     products = await service.search_products(
@@ -183,7 +181,7 @@ async def test_search_products_accepts_a_bare_list_payload(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": [RAW_PRODUCT]})
+    mock_instamart_tool_call.configure(result={"structuredContent": [RAW_PRODUCT]})
 
     products = await service.search_products(
         db_session, linked_user.id, address_id="addr-1", query="milk"
@@ -197,9 +195,7 @@ async def test_search_products_returns_an_empty_list_for_no_results(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"products": []}}
-    )
+    mock_instamart_tool_call.configure(result={"structuredContent": {"products": []}})
 
     products = await service.search_products(
         db_session, linked_user.id, address_id="addr-1", query="an-unmatched-query"
@@ -253,7 +249,7 @@ async def test_get_go_to_items_sends_correct_params(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": {"items": []}})
+    mock_instamart_tool_call.configure(result={"structuredContent": {"items": []}})
 
     await service.get_go_to_items(db_session, linked_user.id, "addr-1")
 
@@ -270,7 +266,7 @@ async def test_get_go_to_items_parses_a_nested_list(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     mock_instamart_tool_call.configure(
-        result={"success": True, "data": {"items": [RAW_GO_TO_ITEM]}}
+        result={"structuredContent": {"items": [RAW_GO_TO_ITEM]}}
     )
 
     items = await service.get_go_to_items(db_session, linked_user.id, "addr-1")
@@ -285,9 +281,7 @@ async def test_get_go_to_items_accepts_a_bare_list_payload(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(
-        result={"success": True, "data": [RAW_GO_TO_ITEM]}
-    )
+    mock_instamart_tool_call.configure(result={"structuredContent": [RAW_GO_TO_ITEM]})
 
     items = await service.get_go_to_items(db_session, linked_user.id, "addr-1")
 

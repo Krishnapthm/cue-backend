@@ -27,7 +27,7 @@ async def test_update_cart_sends_the_full_item_list_and_address(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_CART})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_CART})
 
     await service.update_cart(
         db_session,
@@ -51,7 +51,7 @@ async def test_update_cart_parses_the_returned_cart(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_CART})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_CART})
 
     cart = await service.update_cart(
         db_session,
@@ -71,7 +71,7 @@ async def test_get_cart_reads_back_the_server_cart(
     linked_user: User,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_CART})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_CART})
 
     cart = await service.get_cart(db_session, linked_user.id)
 

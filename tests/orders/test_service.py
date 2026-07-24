@@ -30,7 +30,7 @@ async def test_first_call_hits_swiggy_and_returns_mapped_tracking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_clock(monkeypatch, [0.0])
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_TRACKING})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_TRACKING})
 
     response = await service.get_tracking(
         db_session, linked_user.id, "order-1", lat=1.0, lng=2.0
@@ -51,7 +51,7 @@ async def test_second_call_within_window_is_served_from_cache(
 ) -> None:
     clock = [0.0]
     _set_clock(monkeypatch, clock)
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_TRACKING})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_TRACKING})
 
     first = await service.get_tracking(
         db_session, linked_user.id, "order-1", lat=1.0, lng=2.0
@@ -73,7 +73,7 @@ async def test_call_after_the_floor_hits_swiggy_again(
 ) -> None:
     clock = [0.0]
     _set_clock(monkeypatch, clock)
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_TRACKING})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_TRACKING})
 
     await service.get_tracking(db_session, linked_user.id, "order-1", lat=1.0, lng=2.0)
     clock[0] = 10.0
@@ -101,7 +101,7 @@ async def test_status_mapping(
 ) -> None:
     _set_clock(monkeypatch, [0.0])
     mock_instamart_tool_call.configure(
-        result={"success": True, "data": {**RAW_TRACKING, "status": raw_status}}
+        result={"structuredContent": {**RAW_TRACKING, "status": raw_status}}
     )
 
     response = await service.get_tracking(
@@ -118,7 +118,7 @@ async def test_a_different_order_key_is_not_served_from_another_orders_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_clock(monkeypatch, [0.0])
-    mock_instamart_tool_call.configure(result={"success": True, "data": RAW_TRACKING})
+    mock_instamart_tool_call.configure(result={"structuredContent": RAW_TRACKING})
 
     await service.get_tracking(db_session, linked_user.id, "order-1", lat=1.0, lng=2.0)
     await service.get_tracking(
@@ -141,7 +141,10 @@ async def test_instamart_domain_error_propagates_and_is_not_cached(
     clock = [0.0]
     _set_clock(monkeypatch, clock)
     mock_instamart_tool_call.configure(
-        result={"success": False, "error": {"message": "order too old to track"}}
+        result={
+            "isError": True,
+            "content": [{"type": "text", "text": "order too old to track"}],
+        }
     )
 
     with pytest.raises(InstamartDomainError):
