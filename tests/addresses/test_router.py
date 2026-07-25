@@ -12,13 +12,13 @@ import httpx
 
 from tests.conftest import InstamartToolCallStub
 
+# Mirrors an observed live get_addresses row - see tests/instamart/test_service.py.
 RAW_ADDRESS = {
-    "addressId": "addr-1",
-    "fullAddress": "221B Baker Street, London",
-    "addressLine": "221B Baker Street",
-    "city": "London",
-    "postalCode": "NW1 6XE",
-    "addressCategory": "HOME",
+    "id": "addr-1",
+    "addressLine": "Sherlock: 221B Baker Street, London, NW1 6XE",
+    "phoneNumber": "****7890",
+    "addressCategory": "Home",
+    "addressTag": "Home",
 }
 
 CREATE_BODY = {
@@ -53,15 +53,11 @@ async def test_list_returns_saved_addresses(
     assert response.status_code == 200
     assert response.json() == [
         {
-            "addressId": "addr-1",
-            "fullAddress": "221B Baker Street, London",
-            "addressLine": "221B Baker Street",
-            "addressLine2": None,
-            "city": "London",
-            "postalCode": "NW1 6XE",
-            "locality": None,
+            "id": "addr-1",
+            "addressLine": "Sherlock: 221B Baker Street, London, NW1 6XE",
+            "phoneNumber": "****7890",
             "addressCategory": "HOME",
-            "addressTag": None,
+            "addressTag": "Home",
         }
     ]
 
@@ -97,7 +93,7 @@ async def test_create_returns_the_saved_address(
     response = await authed_client.post("/addresses", json=CREATE_BODY)
 
     assert response.status_code == 201
-    assert response.json()["addressId"] == "addr-1"
+    assert response.json()["id"] == "addr-1"
 
     (_, kwargs) = mock_instamart_tool_call.calls[0]
     arguments = kwargs["json"]["params"]["arguments"]

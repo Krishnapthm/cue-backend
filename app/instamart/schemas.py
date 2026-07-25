@@ -2,9 +2,10 @@
 
 Field names for `create_address`'s request are exactly as documented at
 https://mcp.swiggy.com/builders/docs/reference/instamart/create_address.md.
-Swiggy's response payloads are not field-documented; `Address` mirrors the
-request fields it round-trips plus `addressId`, which `delete_address`'s docs
-confirm is present on every saved address. `ProductVariant.spin_id` is
+Swiggy's response payloads are not field-documented, so `Address` mirrors an
+observed live `get_addresses` response rather than the request it round-trips:
+the read model is much narrower than the write model (one flattened
+`addressLine`, no city/postalCode/coordinates). `ProductVariant.spin_id` is
 likewise inferred rather than literally spelled out on `search_products`' own
 page, but is cross-confirmed by `update_cart`'s documented request shape
 (`items: [{spinId, quantity}]`) - cart operations are variant-level and
@@ -13,11 +14,14 @@ addressed by spinId (R4.1/R4.2).
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+
+logger = logging.getLogger(__name__)
 
 
 class AddressCategory(StrEnum):
@@ -29,23 +33,41 @@ class AddressCategory(StrEnum):
     FRIENDS_AND_FAMILY = "FRIENDS_AND_FAMILY"
     OTHER = "OTHER"
 
+    @classmethod
+    def _missing_(cls, value: object) -> AddressCategory:
+        """Coerce Swiggy's read-side spelling onto the documented enum.
+
+        `create_address` takes SCREAMING_SNAKE ("FRIENDS_AND_FAMILY") but
+        `get_addresses` echoes categories back title-cased ("Home", "Other"),
+        so the two sides of the same field disagree on casing. Anything that
+        still doesn't match degrades to `OTHER` rather than failing the whole
+        list: the category only drives which icon the sheet renders, and the
+        user's own label lives in `address_tag`.
+        """
+        if isinstance(value, str):
+            normalized = value.strip().upper().replace(" ", "_").replace("&", "AND")
+            for member in cls:
+                if member.value == normalized:
+                    return member
+        logger.warning("Unrecognized Swiggy addressCategory %r; using OTHER", value)
+        return cls.OTHER
+
 
 class Address(BaseModel):
-    """A saved Swiggy delivery address (get_addresses).
+    """A saved Swiggy delivery address, as returned by `get_addresses`.
 
-    Latitude/longitude are withheld by Swiggy for privacy and are never
-    present here.
+    Swiggy's read model is far narrower than `create_address`'s request: the
+    address comes back as a single flattened `addressLine` (with the account
+    holder's name prefixed), and city, postal code, locality and
+    latitude/longitude are all withheld - the coordinates deliberately, for
+    privacy. `phoneNumber` arrives masked (e.g. "****0324").
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    address_id: str = Field(alias="addressId")
-    full_address: str = Field(alias="fullAddress")
+    id: str
     address_line: str = Field(alias="addressLine")
-    address_line2: str | None = Field(default=None, alias="addressLine2")
-    city: str
-    postal_code: str = Field(alias="postalCode")
-    locality: str | None = None
+    phone_number: str | None = Field(default=None, alias="phoneNumber")
     address_category: AddressCategory | None = Field(
         default=None, alias="addressCategory"
     )
