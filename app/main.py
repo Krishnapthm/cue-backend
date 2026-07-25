@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.addresses.router import router as addresses_router
 from app.auth.router import router as auth_router
 from app.chat.router import router as chat_router
 from app.config import Environment, settings
@@ -59,3 +60,4 @@ app.include_router(auth_router)
 app.include_router(providers_router)
 app.include_router(chat_router)
 app.include_router(orders_router)
+app.include_router(addresses_router)
