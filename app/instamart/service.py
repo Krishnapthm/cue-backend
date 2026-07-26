@@ -51,13 +51,37 @@ from app.instamart.schemas import (
 from app.providers import service as provider_service
 
 
+async def resolve_access_token(session: AsyncSession, user_id: int) -> str:
+    """Return the user's live Swiggy access token, or fail like a dead session.
+
+    Exposed for callers that fan several tool calls out concurrently: a single
+    `AsyncSession` cannot be used from more than one coroutine at a time, so
+    the token is resolved once, serially, and the concurrent leg is then pure
+    HTTP via the `*_with_token` wrappers.
+
+    Args:
+        session: An active database session.
+        user_id: The user whose Swiggy link to read.
+
+    Returns:
+        The decrypted access token.
+
+    Raises:
+        InstamartAuthError: If the account is not linked, or the link is
+            expired - indistinguishable to the caller, and recoverable only
+            by a fresh OAuth authorize.
+    """
+    token = await provider_service.get_decrypted_access_token(session, user_id)
+    if token is None:
+        raise InstamartAuthError
+    return token
+
+
 async def _call_authenticated(
     session: AsyncSession, user_id: int, tool_name: str, arguments: dict[str, Any]
 ) -> Any:
     """Call an Instamart tool with the user's token, applying the recovery ladder."""
-    token = await provider_service.get_decrypted_access_token(session, user_id)
-    if token is None:
-        raise InstamartAuthError
+    token = await resolve_access_token(session, user_id)
     try:
         return await client.call_tool(token, tool_name, arguments)
     except InstamartAuthError:
@@ -116,8 +140,51 @@ async def search_products(
         session,
         user_id,
         TOOL_SEARCH_PRODUCTS,
-        {"addressId": address_id, "query": query, "offset": offset},
+        _search_arguments(address_id=address_id, query=query, offset=offset),
     )
+    return _parse_products(data)
+
+
+async def search_products_with_token(
+    access_token: str,
+    *,
+    address_id: str,
+    query: str,
+    offset: int = DEFAULT_SEARCH_OFFSET,
+) -> list[Product]:
+    """`search_products` for a caller that already holds the access token.
+
+    Identical to `search_products` in request shape and parsing, but touches
+    no database session, so several of these can run concurrently under one
+    request (CUE-74's batch tag resolution). The auth recovery ladder is the
+    caller's to apply: an `InstamartAuthError` raised here has not marked the
+    provider link expired.
+
+    Args:
+        access_token: A token from `resolve_access_token`.
+        address_id: The delivery address results are scoped to.
+        query: Free text - a bare pantry slug is a valid query.
+        offset: Result offset for paging.
+
+    Returns:
+        The parsed candidates; empty when Swiggy has nothing, which is not an
+        error.
+    """
+    data = await client.call_tool(
+        access_token,
+        TOOL_SEARCH_PRODUCTS,
+        _search_arguments(address_id=address_id, query=query, offset=offset),
+    )
+    return _parse_products(data)
+
+
+def _search_arguments(*, address_id: str, query: str, offset: int) -> dict[str, Any]:
+    """Build `search_products` arguments, spelled once for both wrappers."""
+    return {"addressId": address_id, "query": query, "offset": offset}
+
+
+def _parse_products(data: Any) -> list[Product]:
+    """Parse a `search_products` payload into candidates."""
     # The envelope key holding the list isn't pinned by Swiggy's docs; accept
     # either a bare list or one nested under "products".
     raw_products = data.get("products", []) if isinstance(data, dict) else data or []

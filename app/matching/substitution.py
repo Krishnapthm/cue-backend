@@ -23,6 +23,16 @@ _DISTANCE_KNOWN = 0
 _DISTANCE_UNKNOWN = 1
 _UNKNOWN_DISTANCE_PLACEHOLDER = Decimal(0)
 
+# Sort-key rank for a candidate the user has ordered before vs. one they
+# haven't. Leads the key, so a go-to variant outranks a closer or cheaper
+# stranger - see `rank_candidates`.
+_PREFERRED = 0
+_NOT_PREFERRED = 1
+
+# One purchasable candidate: the product it belongs to, the variant that is
+# actually orderable, and that variant's price (never None by construction).
+RankedCandidate = tuple[Product, ProductVariant, Decimal]
+
 
 def _pack_size_distance(
     preferred_pack_size: str | None, candidate_pack_size: str | None
@@ -51,20 +61,67 @@ def _pack_size_distance(
 
 
 def _sort_key(
-    candidate: tuple[Product, ProductVariant, Decimal], preferred_pack_size: str | None
-) -> tuple[int, Decimal, Decimal, str]:
-    """Full deterministic ranking key: pack-size closeness, price, spin_id.
+    candidate: RankedCandidate,
+    preferred_pack_size: str | None,
+    preferred_spin_ids: frozenset[str],
+) -> tuple[int, int, Decimal, Decimal, str]:
+    """Full deterministic ranking key: go-to, pack size, price, spin_id.
 
-    Candidates rank by pack-size closeness to `preferred_pack_size` first,
-    then by lowest price, then by `spin_id` ascending as an always-present
-    tie-break so identically-ranked candidates resolve the same way every
-    call.
+    Candidates the user has ordered before rank first, then by pack-size
+    closeness to `preferred_pack_size`, then by lowest price, then by
+    `spin_id` ascending as an always-present tie-break so identically-ranked
+    candidates resolve the same way every call.
     """
     _, variant, price = candidate
     distance_rank, distance = _pack_size_distance(
         preferred_pack_size, variant.pack_size
     )
-    return (distance_rank, distance, price, variant.spin_id)
+    preference_rank = (
+        _PREFERRED if variant.spin_id in preferred_spin_ids else _NOT_PREFERRED
+    )
+    return (preference_rank, distance_rank, distance, price, variant.spin_id)
+
+
+def rank_candidates(
+    products: list[Product],
+    *,
+    preferred_pack_size: str | None = None,
+    preferred_spin_ids: frozenset[str] = frozenset(),
+) -> list[RankedCandidate]:
+    """Rank search results into a deterministic best-first order.
+
+    The single ranker for every "which variant do we buy?" decision, so
+    substitution (R4.4) and NFC tag binding (CUE-74) can never drift into
+    disagreeing about what the best variant for a search term is. Only
+    purchasable candidates - in stock, with a price - are considered; an
+    unpriced or out-of-stock variant is not orderable and is dropped rather
+    than ranked last.
+
+    Args:
+        products: Whatever `search_products` returned for the term.
+        preferred_pack_size: The pack size to sort towards, e.g. "500 g".
+            `None` (nothing known to prefer) leaves pack size out of the
+            ordering entirely, since every candidate then ranks the same.
+        preferred_spin_ids: Variants the user has ordered before, from
+            `your_go_to_items`. An empty set - a household with no history -
+            simply promotes nothing.
+
+    Returns:
+        Every purchasable candidate, best first. Empty when nothing in
+        `products` is orderable.
+    """
+    candidates: list[RankedCandidate] = [
+        (product, variant, variant.price)
+        for product in products
+        for variant in product.variants
+        if variant.in_stock is True and variant.price is not None
+    ]
+    candidates.sort(
+        key=lambda candidate: _sort_key(
+            candidate, preferred_pack_size, preferred_spin_ids
+        )
+    )
+    return candidates
 
 
 def _describe_substitution(
@@ -124,16 +181,10 @@ async def propose_substitute(
         session, user_id, address_id=address_id, query=ingredient_name
     )
 
-    candidates: list[tuple[Product, ProductVariant, Decimal]] = [
-        (product, variant, variant.price)
-        for product in products
-        for variant in product.variants
-        if variant.in_stock is True and variant.price is not None
-    ]
+    candidates = rank_candidates(products, preferred_pack_size=preferred_pack_size)
     if not candidates:
         return None
 
-    candidates.sort(key=lambda candidate: _sort_key(candidate, preferred_pack_size))
     best_product, best_variant, best_price = candidates[0]
 
     product_name = best_product.name or best_product.brand or ingredient_name
