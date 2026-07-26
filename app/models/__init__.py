@@ -10,6 +10,7 @@ from __future__ import annotations
 from app.models.cart import CartPlan, CartPlanItem
 from app.models.chat import ChatMessage, ChatSession
 from app.models.order import Order
+from app.models.pantry import PantryItem
 from app.models.provider import OAuthTransaction, ProviderLink
 from app.models.user import User
 
@@ -20,6 +21,7 @@ __all__ = [
     "ChatSession",
     "OAuthTransaction",
     "Order",
+    "PantryItem",
     "ProviderLink",
     "User",
 ]
