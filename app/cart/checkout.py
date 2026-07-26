@@ -12,10 +12,11 @@ match a specific order with certainty.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cart.exceptions import CartNotCheckoutableError, CheckoutInProgressError
@@ -27,6 +28,36 @@ from app.instamart.exceptions import (
 )
 from app.instamart.schemas import OrderSummary
 from app.models.order import Order
+from app.pantry import service as pantry_service
+
+logger = logging.getLogger(__name__)
+
+
+async def _stamp_pantry(
+    session: AsyncSession, user_id: int, plan_id: int, placed_at: datetime
+) -> None:
+    """Record that a placed order restocked the user's matching staples.
+
+    Runs after the order has already been committed, in its own transaction,
+    and swallows database failures: this is bookkeeping for the Pantry
+    screen's "Bought 3 days ago" line, and losing it must never turn a
+    successfully placed order into an error the caller sees.
+    """
+    try:
+        stamped = await pantry_service.stamp_last_bought(
+            session, user_id, plan_id, placed_at
+        )
+        await session.commit()
+    except SQLAlchemyError:
+        await session.rollback()
+        logger.exception(
+            "Failed to stamp last_bought_at for user %s, plan %s; the order is "
+            "placed regardless.",
+            user_id,
+            plan_id,
+        )
+        return
+    logger.info("Stamped last_bought_at on %s pantry item(s).", stamped)
 
 
 async def place_order(
@@ -96,4 +127,5 @@ async def place_order(
     order.total = result.total
     order.placed_at = datetime.now(UTC)
     await session.commit()
+    await _stamp_pantry(session, user_id, plan_id, order.placed_at)
     return order, []

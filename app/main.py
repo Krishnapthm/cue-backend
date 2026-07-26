@@ -14,6 +14,7 @@ from app.database import engine
 from app.exceptions import register_exception_handlers
 from app.health.router import router as health_router
 from app.orders.router import router as orders_router
+from app.pantry.router import router as pantry_router
 from app.providers.router import router as providers_router
 
 logging.basicConfig(
@@ -59,3 +60,4 @@ app.include_router(auth_router)
 app.include_router(providers_router)
 app.include_router(chat_router)
 app.include_router(orders_router)
+app.include_router(pantry_router)
