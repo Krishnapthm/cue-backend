@@ -17,13 +17,15 @@ from app.models.user import User
 from app.providers import service as provider_service
 from tests.conftest import InstamartToolCallStub
 
+# Mirrors an observed live get_addresses row: a flattened `addressLine`, a
+# masked phone, and a title-cased category - not the SCREAMING_SNAKE spelling
+# create_address takes on the way in.
 RAW_ADDRESS = {
-    "addressId": "addr-1",
-    "fullAddress": "221B Baker Street, London",
-    "addressLine": "221B Baker Street",
-    "city": "London",
-    "postalCode": "NW16XE",
-    "addressCategory": "HOME",
+    "id": "addr-1",
+    "addressLine": "Sherlock: 221B Baker Street, London, NW16XE",
+    "phoneNumber": "****7890",
+    "addressCategory": "Home",
+    "addressTag": "Home",
 }
 
 
@@ -39,8 +41,62 @@ async def test_get_addresses_parses_a_nested_list(
     addresses = await service.get_addresses(db_session, linked_user.id)
 
     assert len(addresses) == 1
-    assert addresses[0].address_id == "addr-1"
+    assert addresses[0].id == "addr-1"
+    assert addresses[0].address_line.endswith("London, NW16XE")
+    assert addresses[0].phone_number == "****7890"
     assert addresses[0].address_category == AddressCategory.HOME
+
+
+async def test_get_addresses_normalizes_swiggys_title_cased_categories(
+    db_session: AsyncSession,
+    linked_user: User,
+    mock_instamart_tool_call: InstamartToolCallStub,
+) -> None:
+    """get_addresses echoes categories back title-cased ("Other"), while
+    create_address takes them SCREAMING_SNAKE; the read side must not 500 on
+    its own spelling, and an unknown category degrades to OTHER."""
+    mock_instamart_tool_call.configure(
+        result={
+            "structuredContent": {
+                "addresses": [
+                    {**RAW_ADDRESS, "addressCategory": "Other"},
+                    {**RAW_ADDRESS, "addressCategory": "Friends And Family"},
+                    {**RAW_ADDRESS, "addressCategory": "Houseboat"},
+                ]
+            }
+        }
+    )
+
+    addresses = await service.get_addresses(db_session, linked_user.id)
+
+    assert [address.address_category for address in addresses] == [
+        AddressCategory.OTHER,
+        AddressCategory.FRIENDS_AND_FAMILY,
+        AddressCategory.OTHER,
+    ]
+
+
+async def test_get_addresses_accepts_an_address_without_a_tag_or_category(
+    db_session: AsyncSession,
+    linked_user: User,
+    mock_instamart_tool_call: InstamartToolCallStub,
+) -> None:
+    """Live rows omit `addressTag` entirely; only id and addressLine are
+    guaranteed."""
+    mock_instamart_tool_call.configure(
+        result={
+            "structuredContent": {
+                "addresses": [{"id": "addr-2", "addressLine": "16th floor, Nandanam"}]
+            }
+        }
+    )
+
+    addresses = await service.get_addresses(db_session, linked_user.id)
+
+    assert addresses[0].id == "addr-2"
+    assert addresses[0].address_tag is None
+    assert addresses[0].address_category is None
+    assert addresses[0].phone_number is None
 
 
 async def test_get_addresses_accepts_a_bare_list_payload(
@@ -53,7 +109,7 @@ async def test_get_addresses_accepts_a_bare_list_payload(
     addresses = await service.get_addresses(db_session, linked_user.id)
 
     assert len(addresses) == 1
-    assert addresses[0].address_id == "addr-1"
+    assert addresses[0].id == "addr-1"
 
 
 async def test_get_addresses_raises_auth_error_when_not_linked(
@@ -107,7 +163,7 @@ async def test_create_address_sends_documented_camelcase_arguments(
     assert arguments["fullAddress"] == "221B Baker Street, London"
     assert arguments["addressCategory"] == "HOME"
     assert "address_category" not in arguments
-    assert address.address_id == "addr-1"
+    assert address.id == "addr-1"
 
 
 async def test_delete_address_calls_the_tool_with_address_id(
