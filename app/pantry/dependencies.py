@@ -6,8 +6,8 @@ from fastapi import Depends
 
 from app.auth.dependencies import CurrentUser
 from app.database import DbSession
+from app.models.pantry import PantryItem
 from app.pantry import service
-from app.pantry.models import PantryItem
 
 
 async def owned_pantry_item(

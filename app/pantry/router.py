@@ -14,9 +14,9 @@ from fastapi import APIRouter, Response, status
 
 from app.auth.dependencies import CurrentUser
 from app.database import DbSession
+from app.models.pantry import PantryItem
 from app.pantry import service
 from app.pantry.dependencies import OwnedPantryItem
-from app.pantry.models import PantryItem
 from app.pantry.schemas import PantryItemCreate, PantryItemResponse, PantryItemUpdate
 
 router = APIRouter(prefix="/pantry", tags=["pantry"])

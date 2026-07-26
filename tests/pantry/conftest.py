@@ -13,9 +13,9 @@ from app.database import get_session
 from app.main import app
 from app.models.cart import CartPlan
 from app.models.chat import ChatSession
+from app.models.pantry import PantryItem
 from app.models.user import User
 from app.pantry.constants import PantryCategory
-from app.pantry.models import PantryItem
 
 
 @pytest_asyncio.fixture

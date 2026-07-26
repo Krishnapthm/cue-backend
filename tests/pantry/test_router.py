@@ -3,10 +3,10 @@ from __future__ import annotations
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.pantry import PantryItem
 from app.models.user import User
 from app.pantry import service
 from app.pantry.constants import CATEGORY_DISPLAY_ORDER, PantryCategory
-from app.pantry.models import PantryItem
 from app.pantry.schemas import PantryItemCreate
 
 RICE = {"name": "Basmati Rice", "category": "Grains & pulses"}

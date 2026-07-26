@@ -18,9 +18,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cart import CartPlanItem
+from app.models.pantry import PantryItem
 from app.pantry.constants import CATEGORY_DISPLAY_ORDER
 from app.pantry.exceptions import PantryItemNameConflictError, PantryItemNotFoundError
-from app.pantry.models import PantryItem
 from app.pantry.schemas import PantryItemCreate, PantryItemUpdate
 
 logger = logging.getLogger(__name__)

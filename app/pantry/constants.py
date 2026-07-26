@@ -32,7 +32,7 @@ class PantryCategory(StrEnum):
 
 
 # Display order as a plain tuple, for the ORDER BY CASE in `list_items` and
-# for the check constraint in `app.pantry.models`.
+# for the check constraint in `app.models.pantry`.
 CATEGORY_DISPLAY_ORDER: tuple[PantryCategory, ...] = tuple(PantryCategory)
 
 # `level` is a 0-3 ordinal, NOT a percentage: 0 = Out, 1 = Low, 2 = Half,
