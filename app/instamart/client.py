@@ -187,6 +187,12 @@ async def call_tool(
         raise InstamartTransportError
 
     payload = _decode_envelope(response)
+    # Full payloads carry saved addresses, masked phone numbers and order
+    # history, so they are logged at DEBUG only - never at INFO, which is the
+    # deployed level (`app.main`). The INFO line below records the shape and
+    # outcome of each call, which is what diagnosing a parse regression like
+    # CUE-77 actually needs.
+    logger.debug("Instamart tool %s raw response: %s", tool_name, payload)
     rpc_error = payload.get("error")
     if rpc_error is not None:
         if rpc_error.get("code") == JSONRPC_AUTH_ERROR_CODE:
@@ -205,6 +211,7 @@ async def call_tool(
     # populating it. As of CUE-77 it is absent from every observed response.
     structured = result.get("structuredContent")
     if structured is not None:
+        logger.info("Instamart tool %s parsed via structuredContent", tool_name)
         return structured
 
     # The real wire format: Swiggy's `{success, data, message}` envelope, JSON
@@ -212,12 +219,29 @@ async def call_tool(
     envelope = _swiggy_envelope(result)
     if envelope is None:
         logger.warning(
-            "Instamart tool %s returned no structured or JSON-text payload",
+            "Instamart tool %s returned no structured or JSON-text payload; "
+            "result keys=%s, content block types=%s",
             tool_name,
+            sorted(result),
+            [
+                block.get("type")
+                for block in result.get("content") or []
+                if isinstance(block, dict)
+            ],
         )
         return None
 
     if envelope.get("success") is False:
-        raise InstamartDomainError(_envelope_error_message(envelope))
+        message = _envelope_error_message(envelope)
+        logger.warning("Instamart tool %s reported failure: %s", tool_name, message)
+        raise InstamartDomainError(message)
 
-    return envelope.get("data")
+    data = envelope.get("data")
+    # Shape, not content: enough to tell "Swiggy sent nothing" from "we failed
+    # to parse what Swiggy sent" without putting user data in the log.
+    logger.info(
+        "Instamart tool %s parsed via text envelope: data keys=%s",
+        tool_name,
+        sorted(data) if isinstance(data, dict) else type(data).__name__,
+    )
+    return data

@@ -337,12 +337,7 @@ class OrderTracking(BaseModel):
 
 
 class PreferenceSignal(BaseModel):
-    """A normalized preference signal consumed by variant selection (R4.3).
-
-    `brand` is always `None` when built from `GoToItem` data - `GoToItem`
-    carries no brand field. The field exists to match the shape the
-    variant-selection consumer expects, not because this source populates it.
-    """
+    """A normalized preference signal consumed by variant selection (R4.3)."""
 
     spin_id: str
     brand: str | None = None
