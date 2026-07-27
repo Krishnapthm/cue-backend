@@ -54,7 +54,12 @@ async def resolve_batch(
     Costs one `your_go_to_items` call plus at most one `search_products` per
     *distinct* slug that is not already bound at the requested address - a
     10-slug scan is 11 upstream calls, not 20, and the searches run
-    concurrently rather than as 10 serial round-trips.
+    concurrently rather than as 10 serial round-trips. `search_products` is
+    the default resolution path for every distinct slug regardless of what
+    `your_go_to_items` returns (CUE-74): go-to items only break ties among
+    the search results afterward, by brand - they never gate or reorder the
+    search itself, so a household with no order history resolves exactly the
+    same way, just always against Swiggy's own first result.
 
     Args:
         session: An active database session.
@@ -89,7 +94,12 @@ async def resolve_batch(
         if binding.address_id == address_id
     }
 
-    preferred_spin_ids = await _preferred_spin_ids(session, user_id, address_id)
+    # CUE-74: go-to-item ranking by spin_id is superseded by brand-preference
+    # matching against search results, below - search_products now runs by
+    # default on the slug alone, and go-to items are only consulted
+    # afterward to break ties among what it returns.
+    # preferred_spin_ids = await _preferred_spin_ids(session, user_id, address_id)
+    preferred_brands = await _preferred_brands(session, user_id, address_id)
 
     queries = sorted(
         {slug for tag_uid, slug in slugs.items() if tag_uid not in reusable}
@@ -105,15 +115,11 @@ async def resolve_batch(
             results.append(_from_binding(cached, tap, TagOutcome.CACHED))
             continue
 
-        ranked = substitution.rank_candidates(
+        best = substitution.select_preferred_candidate(
             candidates_by_slug.get(slug, []),
-            # An existing binding's pack size is the household's known refill
-            # size, so a re-bind at another address stays the same size rather
-            # than silently jumping to whatever is cheapest there.
-            preferred_pack_size=_bound_pack_size(bindings.get(tap.tag_uid)),
-            preferred_spin_ids=preferred_spin_ids,
+            preferred_brands=preferred_brands,
         )
-        if not ranked:
+        if best is None:
             results.append(_unresolved(tap))
             continue
 
@@ -123,7 +129,7 @@ async def resolve_batch(
             tap=tap,
             slug=slug,
             address_id=address_id,
-            best=ranked[0],
+            best=best,
             pantry_item_id=pantry_item_ids.get(slug),
         )
         results.append(_from_binding(binding, tap, TagOutcome.BOUND))
@@ -219,6 +225,9 @@ async def _preferred_spin_ids(
 ) -> frozenset[str]:
     """Fetch the user's go-to variants once per batch, as a set of spin ids.
 
+    Unused as of CUE-74 - see the comment in `resolve_batch` - kept in place
+    rather than deleted in case spin_id-level ranking is reinstated.
+
     Ranking input, never a dependency of resolution: a household with no
     order history, or a `your_go_to_items` call that fails, degrades to plain
     pack-size/price ranking rather than failing the scan. An auth failure is
@@ -236,6 +245,32 @@ async def _preferred_spin_ids(
         return frozenset()
     preferences = instamart_service.normalize_preferences(items)
     return frozenset(signal.spin_id for signal in preferences.values())
+
+
+async def _preferred_brands(
+    session: AsyncSession, user_id: int, address_id: str
+) -> frozenset[str]:
+    """Fetch the user's go-to brands once per batch, for post-search matching.
+
+    Search is the default action for every unresolved slug regardless of
+    this call's outcome (CUE-74): `your_go_to_items` only narrows what
+    `search_products` already returned, it never gates or reorders the
+    search itself. A household with no order history, or a `your_go_to_items`
+    call that fails, simply defers to Swiggy's own first result via
+    `substitution.select_preferred_candidate`. An auth failure is the one
+    exception - with no usable Swiggy session the searches cannot run
+    either, so it is left to propagate.
+    """
+    try:
+        items = await instamart_service.get_go_to_items(session, user_id, address_id)
+    except (InstamartTransportError, InstamartDomainError):
+        logger.warning(
+            "your_go_to_items failed for user %s; deferring to first search result",
+            user_id,
+            exc_info=True,
+        )
+        return frozenset()
+    return frozenset(item.brand for item in items if item.brand)
 
 
 async def _search_slugs(
@@ -360,11 +395,6 @@ async def _stamp_used(session: AsyncSession, user_id: int, tag_uids: list[str]) 
         .where(TagBinding.user_id == user_id, TagBinding.tag_uid.in_(tag_uids))
         .values(last_used_at=datetime.now(UTC))
     )
-
-
-def _bound_pack_size(binding: TagBinding | None) -> str | None:
-    """The pack size a re-bind should sort towards, if the tag had one."""
-    return binding.refill_size if binding is not None else None
 
 
 def _from_binding(

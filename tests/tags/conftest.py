@@ -31,11 +31,13 @@ def product(
     price: str,
     pack_size: str | None = "1 kg",
     in_stock: bool = True,
+    brand: str | None = None,
 ) -> dict[str, Any]:
     """One `search_products` candidate, in Swiggy's wire shape."""
     return {
         "productId": product_id,
         "name": name,
+        "brand": brand,
         "variants": [
             {
                 "spinId": spin_id,
@@ -57,9 +59,19 @@ def go_to_result(*items: dict[str, Any]) -> dict[str, Any]:
     return {"structuredContent": {"items": list(items)}}
 
 
-def go_to_item(*, product_name: str, spin_id: str) -> dict[str, Any]:
-    """One previously-ordered product, in Swiggy's wire shape."""
-    return {"productName": product_name, "variants": [{"spinId": spin_id}]}
+def go_to_item(
+    *, product_name: str, brand: str, spin_id: str = "spin-go-to"
+) -> dict[str, Any]:
+    """One previously-ordered product, in Swiggy's wire shape (CUE-74).
+
+    Mirrors an observed live `your_go_to_items` response: `displayName` and
+    `variations`, not `productName`/`variants`, and a real top-level `brand`.
+    """
+    return {
+        "displayName": product_name,
+        "brand": brand,
+        "variations": [{"spinId": spin_id}],
+    }
 
 
 @pytest.fixture

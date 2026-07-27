@@ -30,12 +30,14 @@ MADHUR_SUGAR = product(
     name="Madhur Pure Sugar",
     spin_id="spin-madhur",
     price="62.00",
+    brand="Madhur",
 )
 CHEAP_SUGAR = product(
     product_id="p-sugar-generic",
     name="Generic Sugar",
     spin_id="spin-generic",
     price="49.00",
+    brand="Generic",
 )
 
 
@@ -105,14 +107,14 @@ async def test_a_second_scan_is_served_from_cache_without_searching(
     assert len(instamart.tool_calls(TOOL_SEARCH_PRODUCTS)) == searches_after_first
 
 
-async def test_a_go_to_variant_outranks_a_cheaper_candidate(
+async def test_a_go_to_brand_outranks_swiggys_own_search_order(
     db_session: AsyncSession, linked_user: User, instamart: InstamartToolCallStub
 ) -> None:
+    # Swiggy's own order puts the cheap generic first; the household has
+    # bought Madhur before, so the go-to brand should win anyway.
     instamart.configure_tool_result(
         TOOL_YOUR_GO_TO_ITEMS,
-        go_to_result(
-            go_to_item(product_name="Madhur Pure Sugar", spin_id="spin-madhur")
-        ),
+        go_to_result(go_to_item(product_name="Madhur Pure Sugar", brand="Madhur")),
     )
     instamart.configure_search_query("sugar", search_result(CHEAP_SUGAR, MADHUR_SUGAR))
 
@@ -124,7 +126,7 @@ async def test_a_go_to_variant_outranks_a_cheaper_candidate(
     assert results[0].unit_price == Decimal("62.00")
 
 
-async def test_without_go_to_history_the_cheapest_candidate_wins(
+async def test_without_a_go_to_match_the_first_search_result_wins(
     db_session: AsyncSession, linked_user: User, instamart: InstamartToolCallStub
 ) -> None:
     instamart.configure_search_query("sugar", search_result(MADHUR_SUGAR, CHEAP_SUGAR))
@@ -133,7 +135,7 @@ async def test_without_go_to_history_the_cheapest_candidate_wins(
         db_session, linked_user.id, batch(tap("uid-sugar", "sugar"))
     )
 
-    assert results[0].spin_id == "spin-generic"
+    assert results[0].spin_id == "spin-madhur"
 
 
 async def test_a_failed_go_to_fetch_still_resolves_the_batch(
@@ -299,7 +301,7 @@ async def test_a_binding_from_another_address_is_reresolved_and_rebound(
     assert binding.address_id == "addr-2"
 
 
-async def test_a_rebind_sorts_towards_the_known_refill_size(
+async def test_a_rebind_at_a_new_address_defers_to_first_search_result(
     db_session: AsyncSession, linked_user: User, instamart: InstamartToolCallStub
 ) -> None:
     instamart.configure_search_query(
@@ -318,8 +320,9 @@ async def test_a_rebind_sorts_towards_the_known_refill_size(
         db_session, linked_user.id, batch(tap("uid-rice", "rice"))
     )
 
-    # At the new address a 1 kg pack is cheaper, but the household's known
-    # refill size is 5 kg, so the closest pack wins over the cheapest.
+    # At the new address, with no go-to brand to match against, resolution
+    # takes Swiggy's own first result - not the pack size closest to the
+    # household's previous 5 kg refill.
     instamart.configure_search_query(
         "rice",
         search_result(
@@ -344,7 +347,7 @@ async def test_a_rebind_sorts_towards_the_known_refill_size(
         db_session, linked_user.id, batch(tap("uid-rice", "rice"), address_id="addr-2")
     )
 
-    assert results[0].spin_id == "spin-5kg-b"
+    assert results[0].spin_id == "spin-1kg"
 
 
 async def test_bindings_are_strictly_per_user(
@@ -410,8 +413,8 @@ async def test_an_unlinked_account_fails_the_whole_batch(
 async def test_the_same_scan_twice_produces_the_same_variant(
     db_session: AsyncSession, linked_user: User, instamart: InstamartToolCallStub
 ) -> None:
-    # Two candidates identical on every ranking term but spin_id, so only the
-    # always-present tie-break can decide - and it must decide the same way.
+    # No go-to brand to break the tie: both scans should defer to Swiggy's
+    # own first search result, deterministically, every time.
     instamart.configure_search_query(
         "salt",
         search_result(
@@ -427,7 +430,7 @@ async def test_the_same_scan_twice_produces_the_same_variant(
         db_session, linked_user.id, batch(tap("uid-salt-2", "salt"))
     )
 
-    assert first[0].spin_id == second[0].spin_id == "spin-a"
+    assert first[0].spin_id == second[0].spin_id == "spin-b"
 
 
 async def test_a_cache_hit_stamps_last_used_at(

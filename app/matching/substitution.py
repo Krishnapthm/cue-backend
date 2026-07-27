@@ -124,6 +124,50 @@ def rank_candidates(
     return candidates
 
 
+def select_preferred_candidate(
+    products: list[Product],
+    *,
+    preferred_brands: frozenset[str] = frozenset(),
+) -> RankedCandidate | None:
+    """Pick one purchasable candidate for a tag-bound slug (CUE-74).
+
+    Default is Swiggy's own relevance order: the first purchasable variant
+    of the first product `search_products` returned, exactly as Swiggy
+    ranked it. If any purchasable product's brand is one the user has
+    ordered before (from `your_go_to_items`), that candidate wins instead -
+    a search for "sugar" that comes back with four brands should still
+    resolve to the one the household actually buys, not whichever brand
+    Swiggy's search happens to rank first.
+
+    Args:
+        products: Whatever `search_products` returned for the slug, in
+            Swiggy's own order.
+        preferred_brands: Brands the user has ordered before, from
+            `your_go_to_items`. Empty - a household with no order history,
+            or a failed go-to lookup - simply defers to the first result.
+
+    Returns:
+        The winning candidate, or `None` if nothing in `products` is
+        purchasable (in stock, with a price).
+    """
+    purchasable = [
+        (product, variant, variant.price)
+        for product in products
+        for variant in product.variants
+        if variant.in_stock is True and variant.price is not None
+    ]
+    if not purchasable:
+        return None
+
+    if preferred_brands:
+        for candidate in purchasable:
+            product, _, _ = candidate
+            if product.brand and product.brand in preferred_brands:
+                return candidate
+
+    return purchasable[0]
+
+
 def _describe_substitution(
     ingredient_name: str,
     preferred_pack_size: str | None,

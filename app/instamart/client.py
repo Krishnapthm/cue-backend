@@ -137,6 +137,7 @@ async def call_tool(
         raise InstamartTransportError
 
     payload = _decode_envelope(response)
+    logger.info("Instamart tool %s response: %s", tool_name, payload)
     rpc_error = payload.get("error")
     if rpc_error is not None:
         if rpc_error.get("code") == JSONRPC_AUTH_ERROR_CODE:

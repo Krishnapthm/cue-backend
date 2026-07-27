@@ -334,8 +334,7 @@ def normalize_preferences(items: list[GoToItem]) -> dict[str, PreferenceSignal]:
     `variants[0]` is the preferred variant; items with no variants are
     skipped rather than raising. The first occurrence of a given
     `product_name` wins, so a later, less-ordered duplicate never overwrites
-    the most-ordered signal. `PreferenceSignal.brand` is always `None` here -
-    see `PreferenceSignal`'s docstring.
+    the most-ordered signal.
     """
     preferences: dict[str, PreferenceSignal] = {}
     for item in items:
@@ -343,6 +342,6 @@ def normalize_preferences(items: list[GoToItem]) -> dict[str, PreferenceSignal]:
             continue
         preferences.setdefault(
             item.product_name,
-            PreferenceSignal(spin_id=item.variants[0].spin_id, brand=None),
+            PreferenceSignal(spin_id=item.variants[0].spin_id, brand=item.brand),
         )
     return preferences
