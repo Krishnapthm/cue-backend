@@ -19,3 +19,7 @@ wheels/
 
 scratchpad.txt
 
+# Captured Swiggy payloads (scripts/capture_search_products.py) - real
+# responses carry user data and must never be committed.
+search_products_capture.json
+
