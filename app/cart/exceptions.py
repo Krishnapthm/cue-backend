@@ -12,6 +12,18 @@ class CartNotCheckoutableError(AppError):
     detail = "Cart is empty; nothing to check out."
 
 
+class CartItemNotFoundError(AppError):
+    """The addressed `spin_id` is not a line of the caller's server cart (CUE-80).
+
+    Raised by the PATCH/DELETE item routes rather than silently creating the
+    line: a quantity change against something the cart does not hold is a
+    client bug, not an add.
+    """
+
+    status_code = status.HTTP_404_NOT_FOUND
+    detail = "No such item in the cart."
+
+
 class CheckoutInProgressError(AppError):
     """Another checkout is already `placing` for this user (R6.3).
 

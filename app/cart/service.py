@@ -19,24 +19,53 @@ handle, not an error.
 `compose_cart` takes the selections for every ingredient in a session and
 writes them as a single `CartPlan` (R5.1), enforcing the Rs 99 minimum
 (R5.4) and the address-bound-plan invariant (R3.3).
+
+`get_cart` / `add_items` / `set_item_quantity` / `remove_item` back the cart
+API (CUE-80). Swiggy's `update_cart` *replaces* the cart, so every one of
+them is a read-merge-write against the current server cart - written once,
+here, so the three mutating routes cannot each invent their own version of
+it. See `_user_cart_lock` for the concurrency guarantee, which is
+deliberately per-process only.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
 import uuid
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cart.constants import MINIMUM_ORDER_VALUE
-from app.cart.schemas import ComposeCartResult, Ingredient, MatchStatus, SelectedVariant
+from app.cart.constants import DROPPED_BY_SWIGGY_REASON, MINIMUM_ORDER_VALUE
+from app.cart.exceptions import CartItemNotFoundError
+from app.cart.schemas import (
+    CartItemRequest,
+    CartMutationResult,
+    ComposeCartResult,
+    Ingredient,
+    MatchStatus,
+    RejectedCartItem,
+    SelectedVariant,
+)
 from app.cart.units import normalize_quantity, parse_pack_size
 from app.instamart import service as instamart_service
-from app.instamart.schemas import CartItemInput, Product, ProductVariant
+from app.instamart.exceptions import InstamartDomainError
+from app.instamart.schemas import (
+    Cart,
+    CartItemInput,
+    CartLineItem,
+    Product,
+    ProductVariant,
+)
 from app.models.cart import CartPlan, CartPlanItem
+
+logger = logging.getLogger(__name__)
 
 _NO_IN_STOCK_VARIANT_REASON = "No in-stock variant found for this ingredient."
 _INFINITY = Decimal("Infinity")
@@ -257,3 +286,280 @@ async def _supersede_live_plan(
         .values(superseded_at=datetime.now(UTC))
     )
     await session.execute(stmt)
+
+
+# --------------------------------------------------------------------------
+# Cart API (CUE-80)
+# --------------------------------------------------------------------------
+
+# One lock per user, created on demand and dropped once nobody holds or
+# awaits it, so a long-lived process doesn't accumulate a lock per user
+# who ever touched their cart.
+_cart_locks: dict[int, asyncio.Lock] = {}
+_cart_lock_users: dict[int, int] = {}
+_cart_locks_guard = asyncio.Lock()
+
+
+@asynccontextmanager
+async def _user_cart_lock(user_id: int) -> AsyncIterator[None]:
+    """Serialize read-merge-write against one user's cart.
+
+    Read-merge-write is not atomic against Swiggy: two concurrent adds that
+    both read the same cart would each write their own merge, and the second
+    write would drop the first one's lines. This lock closes that window.
+
+    The guarantee is honest but narrow: it holds **within a single worker
+    process only**. A horizontally scaled deployment (or a multi-worker
+    uvicorn) can still interleave two requests for the same user across
+    processes. Closing that needs a shared lock (Postgres advisory lock or
+    Redis); it is deliberately out of scope here, and noted rather than
+    papered over.
+    """
+    async with _cart_locks_guard:
+        lock = _cart_locks.setdefault(user_id, asyncio.Lock())
+        _cart_lock_users[user_id] = _cart_lock_users.get(user_id, 0) + 1
+    try:
+        async with lock:
+            yield
+    finally:
+        async with _cart_locks_guard:
+            _cart_lock_users[user_id] -= 1
+            if _cart_lock_users[user_id] == 0:
+                del _cart_lock_users[user_id]
+                del _cart_locks[user_id]
+
+
+def _as_inputs(lines: Iterable[CartLineItem]) -> list[CartItemInput]:
+    """Project cart lines back onto `update_cart`'s request shape."""
+    return [
+        CartItemInput(spin_id=line.spin_id, quantity=line.quantity) for line in lines
+    ]
+
+
+def _merge(
+    existing: Iterable[CartItemInput], additions: Iterable[CartItemRequest]
+) -> list[CartItemInput]:
+    """Merge `additions` onto `existing`, summing quantities per `spin_id`.
+
+    The union, never the delta: `update_cart` replaces the cart, so anything
+    omitted here is deleted from the user's real cart. An item already in
+    the cart has its quantity *increased* rather than overwritten - the app
+    sends "add one more of this", not "make it exactly this many".
+
+    Existing lines keep their order and come first, so a write never
+    gratuitously reshuffles the user's cart.
+    """
+    quantities: dict[str, int] = {item.spin_id: item.quantity for item in existing}
+    for addition in additions:
+        quantities[addition.spin_id] = (
+            quantities.get(addition.spin_id, 0) + addition.quantity
+        )
+    return [
+        CartItemInput(spin_id=spin_id, quantity=quantity)
+        for spin_id, quantity in quantities.items()
+    ]
+
+
+def _dropped(
+    cart: Cart, requested: Iterable[CartItemRequest], already_rejected: set[str]
+) -> list[RejectedCartItem]:
+    """Report requested lines missing from the cart Swiggy read back.
+
+    Swiggy does not always fail a write it cannot fully honour: it can
+    answer `success: true` and quietly omit an out-of-stock or undeliverable
+    line. Diffing the read-back against what we asked for is the only way to
+    catch that, and it costs no extra call.
+    """
+    present = {line.spin_id for line in cart.items}
+    return [
+        RejectedCartItem(
+            spin_id=item.spin_id,
+            quantity=item.quantity,
+            reason=DROPPED_BY_SWIGGY_REASON,
+        )
+        for item in requested
+        if item.spin_id not in present and item.spin_id not in already_rejected
+    ]
+
+
+async def get_cart(session: AsyncSession, user_id: int) -> Cart:
+    """Return the user's current Swiggy server cart (R5.2)."""
+    return await instamart_service.get_cart(session, user_id)
+
+
+async def add_items(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    address_id: str,
+    items: list[CartItemRequest],
+) -> CartMutationResult:
+    """Add `items` to the user's cart, preserving whatever it already holds.
+
+    Reads the current cart, merges the additions onto it, and writes the
+    union - `update_cart` replaces the cart, so writing only the incoming
+    items would silently wipe everything the user already had.
+
+    A `spin_id` Swiggy will not accept is reported per-item; the rest of the
+    batch still lands. That is never an error status: a partly-accepted
+    batch is a successful call with a non-empty `rejected`.
+
+    Raises:
+        InstamartAuthError: The Swiggy link is missing or expired (401).
+        InstamartTransportError: Swiggy was unreachable (502).
+    """
+    async with _user_cart_lock(user_id):
+        current = await instamart_service.get_cart(session, user_id)
+        baseline = _as_inputs(current.items)
+        try:
+            cart = await instamart_service.update_cart(
+                session, user_id, address_id=address_id, items=_merge(baseline, items)
+            )
+            rejected: list[RejectedCartItem] = []
+        except InstamartDomainError as exc:
+            # Swiggy failed the batch as a whole and does not say which line
+            # caused it, so fall back to finding out - one write per item,
+            # only on this path.
+            logger.info(
+                "update_cart rejected a %s-item batch for user %s (%s); "
+                "retrying item by item to identify the offending line(s).",
+                len(items),
+                user_id,
+                exc.detail,
+            )
+            cart, rejected = await _add_individually(
+                session, user_id, address_id=address_id, baseline=baseline, items=items
+            )
+
+        rejected += _dropped(cart, items, {item.spin_id for item in rejected})
+        rejected_ids = {item.spin_id for item in rejected}
+        added = [item for item in items if item.spin_id not in rejected_ids]
+        return CartMutationResult(cart=cart, added=added, rejected=rejected)
+
+
+async def _add_individually(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    address_id: str,
+    baseline: list[CartItemInput],
+    items: list[CartItemRequest],
+) -> tuple[Cart, list[RejectedCartItem]]:
+    """Add `items` one at a time, keeping the ones Swiggy accepts.
+
+    Each attempt writes the baseline plus everything accepted so far plus one
+    candidate, so a rejected line never removes an accepted one. Costs one
+    call per item, which is why it only runs after the single batch write has
+    already failed.
+
+    If the *baseline itself* is what Swiggy now refuses - an item that went
+    out of stock while sitting in the cart - every attempt fails and the whole
+    batch reads as rejected. That is a misattribution, but a safe one: nothing
+    is written, and the returned cart is the untouched real one.
+    """
+    accepted: list[CartItemRequest] = []
+    rejected: list[RejectedCartItem] = []
+    cart: Cart | None = None
+
+    for item in items:
+        try:
+            cart = await instamart_service.update_cart(
+                session,
+                user_id,
+                address_id=address_id,
+                items=_merge(baseline, [*accepted, item]),
+            )
+        except InstamartDomainError as exc:
+            rejected.append(
+                RejectedCartItem(
+                    spin_id=item.spin_id, quantity=item.quantity, reason=exc.detail
+                )
+            )
+        else:
+            accepted.append(item)
+
+    if cart is None:
+        # Nothing landed, so no write returned a cart; read the real one
+        # rather than inventing an empty one.
+        cart = await instamart_service.get_cart(session, user_id)
+    return cart, rejected
+
+
+async def set_item_quantity(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    address_id: str,
+    spin_id: str,
+    quantity: int,
+) -> CartMutationResult:
+    """Set one existing line's quantity to `quantity` (absolute, not a delta).
+
+    Raises:
+        CartItemNotFoundError: The cart holds no line for `spin_id` (404).
+        InstamartAuthError: The Swiggy link is missing or expired (401).
+        InstamartTransportError: Swiggy was unreachable (502).
+    """
+    requested = CartItemRequest(spin_id=spin_id, quantity=quantity)
+    async with _user_cart_lock(user_id):
+        current = await instamart_service.get_cart(session, user_id)
+        if not any(line.spin_id == spin_id for line in current.items):
+            raise CartItemNotFoundError
+
+        lines = [
+            CartItemInput(
+                spin_id=line.spin_id,
+                quantity=quantity if line.spin_id == spin_id else line.quantity,
+            )
+            for line in current.items
+        ]
+        try:
+            cart = await instamart_service.update_cart(
+                session, user_id, address_id=address_id, items=lines
+            )
+        except InstamartDomainError as exc:
+            # Same per-item contract as add: the client asked about one line,
+            # so report that one line rather than failing the request.
+            cart = await instamart_service.get_cart(session, user_id)
+            return CartMutationResult(
+                cart=cart,
+                rejected=[
+                    RejectedCartItem(
+                        spin_id=spin_id, quantity=quantity, reason=exc.detail
+                    )
+                ],
+            )
+
+        rejected = _dropped(cart, [requested], set())
+        return CartMutationResult(
+            cart=cart,
+            added=[] if rejected else [requested],
+            rejected=rejected,
+        )
+
+
+async def remove_item(
+    session: AsyncSession, user_id: int, *, address_id: str, spin_id: str
+) -> CartMutationResult:
+    """Remove one line from the cart, leaving every other line untouched.
+
+    Removing the last line writes an empty item list, which is how
+    `update_cart`'s replace semantics express an empty cart.
+
+    Raises:
+        CartItemNotFoundError: The cart holds no line for `spin_id` (404).
+        InstamartAuthError: The Swiggy link is missing or expired (401).
+        InstamartTransportError: Swiggy was unreachable (502).
+    """
+    async with _user_cart_lock(user_id):
+        current = await instamart_service.get_cart(session, user_id)
+        if not any(line.spin_id == spin_id for line in current.items):
+            raise CartItemNotFoundError
+
+        remaining = _as_inputs(
+            line for line in current.items if line.spin_id != spin_id
+        )
+        cart = await instamart_service.update_cart(
+            session, user_id, address_id=address_id, items=remaining
+        )
+        return CartMutationResult(cart=cart)
