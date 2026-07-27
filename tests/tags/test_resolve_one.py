@@ -358,6 +358,37 @@ async def test_a_tap_at_a_new_address_is_reresolved(
     assert result.spin_id == "spin-other"
 
 
+async def test_a_relabeled_sticker_is_reresolved_not_served_stale(
+    db_session: AsyncSession, linked_user: User, instamart: InstamartToolCallStub
+) -> None:
+    """Physical tags get reused: the same `tag_uid` written over with a new
+    slug must not keep answering as whatever it used to be bound to."""
+    instamart.configure_search_query("sugar", search_result(MADHUR_SUGAR))
+    first = await service.resolve_one(
+        db_session, linked_user.id, one("uid-reused", "sugar")
+    )
+    assert first.spin_id == "spin-madhur"
+
+    instamart.configure_search_query(
+        "sooji",
+        search_result(
+            product(
+                product_id="p-sooji",
+                name="Bansi Sooji",
+                spin_id="spin-sooji",
+                price="45.00",
+            )
+        ),
+    )
+    second = await service.resolve_one(
+        db_session, linked_user.id, one("uid-reused", "sooji")
+    )
+
+    assert second.outcome is TagOutcome.BOUND
+    assert second.spin_id == "spin-sooji"
+    assert second.product_name == "Bansi Sooji"
+
+
 async def test_bindings_are_strictly_per_user(
     db_session: AsyncSession,
     linked_user: User,

@@ -97,10 +97,15 @@ async def resolve_batch(
     # gives us no way to check that without searching. Treating an
     # address change as a miss keeps a same-address rescan free (no
     # search at all) while never returning a variant that dies at checkout.
+    # It is also slug-scoped: a sticker is physical and gets reused, so a
+    # binding only counts as a hit if this tap still reads the same text
+    # that produced it - otherwise the tag has been relabeled and the old
+    # binding must not leak onto its new slug.
     reusable = {
         tag_uid: binding
         for tag_uid, binding in bindings.items()
         if binding.address_id == address_id
+        and pantry_service.normalize_name(binding.tag_text) == slugs[tag_uid]
     }
 
     # CUE-74: go-to-item ranking by spin_id is superseded by brand-preference
@@ -179,10 +184,15 @@ async def resolve_one(
 
     bindings = await _load_bindings(session, user_id, [tap.tag_uid])
     binding = bindings.get(tap.tag_uid)
-    # Same address-scoped cache rule as the batch path: a variant orderable
-    # at one address may not be orderable at another, so an address change
-    # is a miss.
-    reusable = binding is not None and binding.address_id == address_id
+    # Same address- and slug-scoped cache rule as the batch path: a variant
+    # orderable at one address may not be orderable at another, and a
+    # sticker that has been peeled and relabeled with a new slug must not
+    # keep answering as whatever it used to be bound to.
+    reusable = (
+        binding is not None
+        and binding.address_id == address_id
+        and pantry_service.normalize_name(binding.tag_text) == slug
+    )
     cached = binding if reusable else None
 
     preferred_brands = await _cached_preferred_brands(session, user_id, address_id)
