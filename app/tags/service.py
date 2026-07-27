@@ -97,10 +97,15 @@ async def resolve_batch(
     # gives us no way to check that without searching. Treating an
     # address change as a miss keeps a same-address rescan free (no
     # search at all) while never returning a variant that dies at checkout.
+    # It is also slug-scoped: a sticker is physical and gets reused, so a
+    # binding only counts as a hit if this tap still reads the same text
+    # that produced it - otherwise the tag has been relabeled and the old
+    # binding must not leak onto its new slug.
     reusable = {
         tag_uid: binding
         for tag_uid, binding in bindings.items()
         if binding.address_id == address_id
+        and pantry_service.normalize_name(binding.tag_text) == slugs[tag_uid]
     }
 
     # CUE-74: go-to-item ranking by spin_id is superseded by brand-preference
@@ -150,10 +155,12 @@ async def resolve_one(
     actually be charged for - "Fortune, not Tata" - while the jar is still in
     their hand, rather than discovering it after the screen has closed.
 
-    Costs nothing upstream on a repeat tap of a tag already bound at this
-    address, and at most one `search_products` otherwise. The go-to brand set
-    is cached per `(user_id, address_id)` for a few minutes (`app.tags.cache`)
-    so a 10-jar scan does not fetch `your_go_to_items` ten times.
+    Always issues one `search_products` for the slug - including on a repeat
+    tap of a tag already bound at this address - so the "not what you're
+    looking for" picker always has real alternates to offer, never just the
+    current pick. The go-to brand set is cached per `(user_id, address_id)`
+    for a few minutes (`app.tags.cache`) so a 10-jar scan does not fetch
+    `your_go_to_items` ten times.
 
     Args:
         session: An active database session.
@@ -164,13 +171,12 @@ async def resolve_one(
 
     Returns:
         The resolution, plus the other purchasable candidates the search
-        turned up. `candidates` is empty on a `cached` outcome - no search
-        ran, so there is nothing to offer. A slug Swiggy has nothing for
-        comes back `unresolved` rather than raising.
+        turned up. `candidates` is populated on every outcome except
+        `unresolved`, so the alternates picker is always available. A slug
+        Swiggy has nothing for comes back `unresolved` rather than raising.
 
     Raises:
-        InstamartAuthError: If the user's Swiggy link is missing or expired
-            and a search was needed to answer.
+        InstamartAuthError: If the user's Swiggy link is missing or expired.
     """
     tap = request.as_tap()
     address_id = request.address_id
@@ -178,31 +184,16 @@ async def resolve_one(
 
     bindings = await _load_bindings(session, user_id, [tap.tag_uid])
     binding = bindings.get(tap.tag_uid)
-    # Same address-scoped cache rule as the batch path: a variant orderable
-    # at one address may not be orderable at another, so an address change
-    # is a miss.
-    reusable = binding is not None and binding.address_id == address_id
+    # Same address- and slug-scoped cache rule as the batch path: a variant
+    # orderable at one address may not be orderable at another, and a
+    # sticker that has been peeled and relabeled with a new slug must not
+    # keep answering as whatever it used to be bound to.
+    reusable = (
+        binding is not None
+        and binding.address_id == address_id
+        and pantry_service.normalize_name(binding.tag_text) == slug
+    )
     cached = binding if reusable else None
-
-    if cached is not None:
-        # Answer entirely from the binding: no `your_go_to_items`, no
-        # `search_products`. Populating `candidates` here would mean searching
-        # anyway, which would defeat the cache and turn a free rescan into a
-        # paid one.
-        resolution, _ = await _resolve_tap(
-            session,
-            user_id=user_id,
-            tap=tap,
-            slug=slug,
-            address_id=address_id,
-            cached=cached,
-            products=[],
-            preferred_brands=frozenset(),
-            pantry_item_id=None,
-        )
-        await _stamp_used(session, user_id, [tap.tag_uid])
-        await session.commit()
-        return _with_candidates(resolution, [])
 
     preferred_brands = await _cached_preferred_brands(session, user_id, address_id)
     products = (await _search_slugs(session, user_id, address_id, [slug])).get(slug, [])
@@ -214,11 +205,13 @@ async def resolve_one(
         tap=tap,
         slug=slug,
         address_id=address_id,
-        cached=None,
+        cached=cached,
         products=products,
         preferred_brands=preferred_brands,
         pantry_item_id=pantry_item_ids.get(slug),
     )
+    if cached is not None:
+        await _stamp_used(session, user_id, [tap.tag_uid])
     await session.commit()
     return _with_candidates(resolution, candidates)
 
@@ -312,12 +305,15 @@ async def _resolve_tap(
 
     Returns:
         The resolution, and the purchasable candidates it was chosen from -
-        empty on a cache hit (nothing was searched) and on an unresolved slug
-        (nothing was purchasable). The winner is always among them, even when
-        it ranked below `MAX_CANDIDATES`.
+        empty only on an unresolved slug, where nothing was purchasable. The
+        winner (the bound variant, on a cache hit) is always among them, even
+        when it ranked below `MAX_CANDIDATES`.
     """
     if cached is not None:
-        return _from_binding(cached, tap, TagOutcome.CACHED), []
+        purchasable = substitution.purchasable_candidates(products)
+        return _from_binding(cached, tap, TagOutcome.CACHED), _capped_around(
+            purchasable, cached.spin_id
+        )
 
     purchasable = substitution.purchasable_candidates(products)
     best = substitution.prefer_by_brand(purchasable, preferred_brands=preferred_brands)
@@ -352,6 +348,22 @@ def _capped(
     if any(variant.spin_id == winning_spin_id for _, variant, _ in kept):
         return kept
     return [*purchasable[: MAX_CANDIDATES - 1], best]
+
+
+def _capped_around(
+    purchasable: list[RankedCandidate], spin_id: str
+) -> list[RankedCandidate]:
+    """`_capped`'s counterpart for a cache hit: no `RankedCandidate` for the
+    bound variant to hand in, only its `spin_id`.
+
+    Matches it against the fresh search results so the bound variant still
+    anchors the capped list; if the catalog has moved on and it is no longer
+    in `purchasable`, there is nothing to force in, so the plain cap stands.
+    """
+    match = next((c for c in purchasable if c[1].spin_id == spin_id), None)
+    if match is None:
+        return purchasable[:MAX_CANDIDATES]
+    return _capped(purchasable, match)
 
 
 def _with_candidates(

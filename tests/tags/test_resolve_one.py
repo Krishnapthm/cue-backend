@@ -76,7 +76,7 @@ async def test_a_single_tap_resolves_to_an_orderable_variant(
     assert len(instamart.tool_calls(TOOL_SEARCH_PRODUCTS)) == 1
 
 
-async def test_a_second_tap_of_the_same_tag_is_cached_without_searching(
+async def test_a_second_tap_of_the_same_tag_is_cached_but_still_searches(
     db_session: AsyncSession, linked_user: User, instamart: InstamartToolCallStub
 ) -> None:
     instamart.configure_search_query("sugar", search_result(MADHUR_SUGAR))
@@ -85,27 +85,31 @@ async def test_a_second_tap_of_the_same_tag_is_cached_without_searching(
 
     second = await service.resolve_one(db_session, linked_user.id, one())
 
+    # The binding still answers the resolution itself - no rebind, no
+    # `your_go_to_items` - but the search re-runs so the alternates picker is
+    # never left with nothing to offer.
     assert second.outcome is TagOutcome.CACHED
     assert second.spin_id == first.spin_id
     assert second.unit_price == first.unit_price
-    assert len(instamart.tool_calls(TOOL_SEARCH_PRODUCTS)) == searches_after_first
+    assert len(instamart.tool_calls(TOOL_SEARCH_PRODUCTS)) == searches_after_first + 1
 
 
-async def test_a_cache_hit_offers_no_candidates_and_issues_no_search(
+async def test_a_cache_hit_still_offers_every_candidate_the_search_turns_up(
     db_session: AsyncSession, linked_user: User, instamart: InstamartToolCallStub
 ) -> None:
     instamart.configure_search_query("sugar", search_result(MADHUR_SUGAR, CHEAP_SUGAR))
-    await service.resolve_one(db_session, linked_user.id, one())
-    searches_after_first = len(instamart.tool_calls(TOOL_SEARCH_PRODUCTS))
+    first = await service.resolve_one(db_session, linked_user.id, one())
 
     second = await service.resolve_one(db_session, linked_user.id, one())
 
-    # Empty means "no alternatives to offer", not an error - and crucially no
-    # search was issued to fill it, which would turn a free rescan into a
-    # paid one.
+    # The picker is never hidden on a cache hit: every alternate the search
+    # turns up is still offered, with the bound variant among them.
     assert second.outcome is TagOutcome.CACHED
-    assert second.candidates == []
-    assert len(instamart.tool_calls(TOOL_SEARCH_PRODUCTS)) == searches_after_first
+    assert first.spin_id in {candidate.spin_id for candidate in second.candidates}
+    assert {candidate.spin_id for candidate in second.candidates} == {
+        "spin-madhur",
+        "spin-generic",
+    }
 
 
 async def test_candidates_carry_the_options_the_winner_beat(
@@ -352,6 +356,37 @@ async def test_a_tap_at_a_new_address_is_reresolved(
     # The cached variant may simply not be orderable at the new address.
     assert result.outcome is TagOutcome.BOUND
     assert result.spin_id == "spin-other"
+
+
+async def test_a_relabeled_sticker_is_reresolved_not_served_stale(
+    db_session: AsyncSession, linked_user: User, instamart: InstamartToolCallStub
+) -> None:
+    """Physical tags get reused: the same `tag_uid` written over with a new
+    slug must not keep answering as whatever it used to be bound to."""
+    instamart.configure_search_query("sugar", search_result(MADHUR_SUGAR))
+    first = await service.resolve_one(
+        db_session, linked_user.id, one("uid-reused", "sugar")
+    )
+    assert first.spin_id == "spin-madhur"
+
+    instamart.configure_search_query(
+        "sooji",
+        search_result(
+            product(
+                product_id="p-sooji",
+                name="Bansi Sooji",
+                spin_id="spin-sooji",
+                price="45.00",
+            )
+        ),
+    )
+    second = await service.resolve_one(
+        db_session, linked_user.id, one("uid-reused", "sooji")
+    )
+
+    assert second.outcome is TagOutcome.BOUND
+    assert second.spin_id == "spin-sooji"
+    assert second.product_name == "Bansi Sooji"
 
 
 async def test_bindings_are_strictly_per_user(
