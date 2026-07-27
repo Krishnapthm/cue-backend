@@ -19,7 +19,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -100,28 +100,64 @@ class ProductVariant(BaseModel):
 
     Cart operations (update_cart) address items by `spin_id`, never by
     product id - a variant is the unit selection and quantity math (CUE-15)
-    reason about. `pack_size`/`price`/`in_stock` are optional: if Swiggy's
-    actual keys differ from these, a variant still parses with them unset
-    rather than failing the whole search.
+    reason about.
+
+    Field names mirror an observed live `search_products` response (CUE-77).
+    The earlier guesses `packSize`/`inStock` never appear on the wire; Swiggy
+    sends `quantityDescription` and `isInStockAndAvailable`. Both spellings
+    are accepted so payloads shaped like the old assumption still parse.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     spin_id: str = Field(alias="spinId")
-    pack_size: str | None = Field(default=None, alias="packSize")
+    pack_size: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("quantityDescription", "packSize", "pack_size"),
+    )
     price: Decimal | None = None
-    in_stock: bool = Field(default=True, alias="inStock")
+    in_stock: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("isInStockAndAvailable", "inStock", "in_stock"),
+    )
+
+    @field_validator("price", mode="before")
+    @classmethod
+    def _flatten_price(cls, value: Any) -> Any:
+        """Reduce Swiggy's nested price object to the price actually charged.
+
+        Live responses send `price` as `{mrp, offerPrice, unitLevelPrice}`,
+        but every consumer (cheapest-variant selection and cart line totals,
+        CUE-15) treats `price` as a single Decimal. `offerPrice` is what the
+        user pays, so it wins; `mrp` is the fallback when nothing is
+        discounted. A plain scalar passes through untouched.
+        """
+        if isinstance(value, dict):
+            offer_price = value.get("offerPrice", value.get("offer_price"))
+            return offer_price if offer_price is not None else value.get("mrp")
+        return value
 
 
 class Product(BaseModel):
-    """A search_products candidate, with its purchasable variants (R4.1)."""
+    """A search_products candidate, with its purchasable variants (R4.1).
+
+    Field names mirror an observed live response (CUE-77): the variant list
+    arrives under `variations` and the name under `displayName`. The previous
+    `variants`/`name` guesses meant every product parsed with an empty
+    variant list, leaving nothing addressable by `spinId` to put in a cart.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     product_id: str | None = Field(default=None, alias="productId")
-    name: str | None = None
+    name: str | None = Field(
+        default=None, validation_alias=AliasChoices("displayName", "name")
+    )
     brand: str | None = None
-    variants: list[ProductVariant] = Field(default_factory=list)
+    variants: list[ProductVariant] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("variations", "variants"),
+    )
 
 
 class CartItemInput(BaseModel):
@@ -248,53 +284,37 @@ class OrderDetails(BaseModel):
     grand_total: Decimal | None = Field(default=None, alias="grandTotal")
 
 
-class GoToItemPrice(BaseModel):
-    """The nested price object on each your_go_to_items variation.
-
-    An observed live response nests `mrp`/`offerPrice` here rather than the
-    flat `price` decimal `search_products`' `ProductVariant` uses.
-    """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    mrp: Decimal | None = None
-    offer_price: Decimal | None = Field(default=None, alias="offerPrice")
-
-
-class GoToItemVariant(BaseModel):
+class GoToItemVariant(ProductVariant):
     """One variation of a your_go_to_items entry (R4.3 preference bootstrap).
 
-    Field names mirror an observed live your_go_to_items response, which
-    disagrees with `ProductVariant`'s: this tool uses `quantityDescription`
-    and `isInStockAndAvailable` where `search_products` uses `packSize` and
-    `inStock`. The tool is assumed to return each item's variations
-    most-ordered-first, so `variants[0]` is the preferred variant.
+    your_go_to_items and search_products return byte-identical variation
+    objects, so this shares `ProductVariant`'s parsing rather than restating
+    it - one place to fix when Swiggy's field names move. The tool is assumed
+    to return each item's variations most-ordered-first, so `variants[0]` is
+    the preferred variant.
     """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    spin_id: str = Field(alias="spinId")
-    pack_size: str | None = Field(default=None, alias="quantityDescription")
-    price: GoToItemPrice | None = None
-    in_stock: bool = Field(default=True, alias="isInStockAndAvailable")
 
 
 class GoToItem(BaseModel):
     """One product the user has previously ordered (your_go_to_items, R4.3).
 
-    Field names mirror an observed live response (CUE-74): the variation
-    list key is `variations`, not `variants`, and the name is `displayName`,
-    not `productName` - both prior guesses left every item's variants
-    parsing as empty. `brand` is a real top-level field Swiggy does send;
-    an earlier assumption that it never appears here was wrong.
+    Field names mirror an observed live response (CUE-77): the name arrives
+    as `displayName` and the list as `variations`. The earlier
+    `productName`/`variants` guesses are still accepted so existing callers
+    and fixtures keep parsing.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    product_name: str = Field(alias="displayName")
+    product_name: str = Field(
+        validation_alias=AliasChoices("displayName", "productName", "product_name")
+    )
     brand: str | None = None
     category: str | None = None
-    variants: list[GoToItemVariant] = Field(default_factory=list, alias="variations")
+    variants: list[GoToItemVariant] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("variations", "variants"),
+    )
 
 
 class OrderTracking(BaseModel):

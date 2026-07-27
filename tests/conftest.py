@@ -151,6 +151,37 @@ class InstamartToolCallStub:
             self.json_body = {"jsonrpc": "2.0", "id": 1, "result": result}
         self.raises = raises
 
+    def configure_text_envelope(
+        self,
+        envelope: dict[str, Any],
+        *,
+        tool_name: str | None = None,
+        status_code: int = 200,
+    ) -> None:
+        """Answer with Swiggy's *real* wire shape (CUE-77).
+
+        Swiggy never populates MCP's `structuredContent`; it JSON-encodes its
+        own `{success, data, message}` envelope into a text content block.
+        `configure`/`configure_tool_result` mock the shape the client used to
+        assume, which is why this bug survived 400+ passing tests - use this
+        helper for anything that should be proven against production's shape.
+
+        Args:
+            envelope: Swiggy's envelope, e.g. `{"success": True, "data": ...}`.
+            tool_name: Scope the response to one tool, as per
+                `configure_tool_result`; None sets the default response.
+            status_code: HTTP status to answer with.
+        """
+        result = {"content": [{"type": "text", "text": json.dumps(envelope)}]}
+        if tool_name is None:
+            self.status_code = status_code
+            self.json_body = {"jsonrpc": "2.0", "id": 1, "result": result}
+        else:
+            self.by_tool[tool_name] = (
+                status_code,
+                {"jsonrpc": "2.0", "id": 1, "result": result},
+            )
+
     def configure_sse(self, *, result: dict[str, Any]) -> None:
         """Answer with the same envelope encoded as a text/event-stream body."""
         self.status_code = 200
