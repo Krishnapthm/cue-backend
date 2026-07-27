@@ -141,10 +141,10 @@ class TagResolveResponse(TagResolution):
     deliberately absent from the batch response, which nothing renders a
     picker from.
 
-    On a `cached` outcome, no search runs - searching purely to fill this
-    list would turn a free rescan into a paid one - so `candidates` holds
-    only the single bound variant rather than a full alternates list.
-    Clients should always have at least one entry to render the picker from.
+    `candidates` is populated on every outcome except `unresolved`, including
+    a `cached` outcome - the single-tap resolve always searches, precisely so
+    the alternates picker is never hidden. Clients should always have at
+    least one entry to render the picker from.
     """
 
     candidates: list[TagCandidate] = Field(default_factory=list)
