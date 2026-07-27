@@ -12,6 +12,7 @@ from app.models.chat import ChatMessage, ChatSession
 from app.models.order import Order
 from app.models.pantry import PantryItem
 from app.models.provider import OAuthTransaction, ProviderLink
+from app.models.tag import TagBinding
 from app.models.user import User
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "Order",
     "PantryItem",
     "ProviderLink",
+    "TagBinding",
     "User",
 ]

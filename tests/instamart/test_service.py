@@ -291,11 +291,20 @@ async def test_search_products_marks_link_expired_on_live_auth_failure(
 
 
 RAW_GO_TO_ITEM = {
-    "productName": "Amul Milk",
+    "displayName": "Amul Milk",
+    "brand": "Amul",
     "category": "Dairy",
-    "variants": [
-        {"spinId": "spin-1", "packSize": "500 ml", "price": "27.00"},
-        {"spinId": "spin-2", "packSize": "1 L", "price": "52.00"},
+    "variations": [
+        {
+            "spinId": "spin-1",
+            "quantityDescription": "500 ml",
+            "price": {"mrp": "30.00", "offerPrice": "27.00"},
+        },
+        {
+            "spinId": "spin-2",
+            "quantityDescription": "1 L",
+            "price": {"mrp": "55.00", "offerPrice": "52.00"},
+        },
     ],
 }
 
@@ -376,11 +385,13 @@ def test_normalize_preferences_maps_name_to_most_ordered_spin_id() -> None:
 
     preferences = service.normalize_preferences([item])
 
-    assert preferences == {"Amul Milk": PreferenceSignal(spin_id="spin-1", brand=None)}
+    assert preferences == {
+        "Amul Milk": PreferenceSignal(spin_id="spin-1", brand="Amul")
+    }
 
 
 def test_normalize_preferences_skips_items_with_no_variants() -> None:
-    item = GoToItem.model_validate({**RAW_GO_TO_ITEM, "variants": []})
+    item = GoToItem.model_validate({**RAW_GO_TO_ITEM, "variations": []})
 
     preferences = service.normalize_preferences([item])
 
@@ -395,8 +406,8 @@ def test_normalize_preferences_keeps_first_occurrence_on_duplicate_names() -> No
     first = GoToItem.model_validate(RAW_GO_TO_ITEM)
     duplicate = GoToItem.model_validate(
         {
-            "productName": "Amul Milk",
-            "variants": [{"spinId": "spin-9", "packSize": "200 ml"}],
+            "displayName": "Amul Milk",
+            "variations": [{"spinId": "spin-9", "quantityDescription": "200 ml"}],
         }
     )
 
@@ -410,8 +421,8 @@ def test_normalize_preferences_is_deterministic() -> None:
         GoToItem.model_validate(RAW_GO_TO_ITEM),
         GoToItem.model_validate(
             {
-                "productName": "Aashirvaad Atta",
-                "variants": [{"spinId": "spin-atta-1"}],
+                "displayName": "Aashirvaad Atta",
+                "variations": [{"spinId": "spin-atta-1"}],
             }
         ),
     ]

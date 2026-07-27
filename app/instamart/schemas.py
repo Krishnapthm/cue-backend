@@ -248,29 +248,53 @@ class OrderDetails(BaseModel):
     grand_total: Decimal | None = Field(default=None, alias="grandTotal")
 
 
-class GoToItemVariant(BaseModel):
-    """One variant of a your_go_to_items entry (R4.3 preference bootstrap).
+class GoToItemPrice(BaseModel):
+    """The nested price object on each your_go_to_items variation.
 
-    Mirrors `ProductVariant`'s shape for the fields your_go_to_items shares
-    with search_products; the tool is assumed to return each item's variants
+    An observed live response nests `mrp`/`offerPrice` here rather than the
+    flat `price` decimal `search_products`' `ProductVariant` uses.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    mrp: Decimal | None = None
+    offer_price: Decimal | None = Field(default=None, alias="offerPrice")
+
+
+class GoToItemVariant(BaseModel):
+    """One variation of a your_go_to_items entry (R4.3 preference bootstrap).
+
+    Field names mirror an observed live your_go_to_items response, which
+    disagrees with `ProductVariant`'s: this tool uses `quantityDescription`
+    and `isInStockAndAvailable` where `search_products` uses `packSize` and
+    `inStock`. The tool is assumed to return each item's variations
     most-ordered-first, so `variants[0]` is the preferred variant.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     spin_id: str = Field(alias="spinId")
-    pack_size: str | None = Field(default=None, alias="packSize")
-    price: Decimal | None = None
+    pack_size: str | None = Field(default=None, alias="quantityDescription")
+    price: GoToItemPrice | None = None
+    in_stock: bool = Field(default=True, alias="isInStockAndAvailable")
 
 
 class GoToItem(BaseModel):
-    """One product the user has previously ordered (your_go_to_items, R4.3)."""
+    """One product the user has previously ordered (your_go_to_items, R4.3).
+
+    Field names mirror an observed live response (CUE-74): the variation
+    list key is `variations`, not `variants`, and the name is `displayName`,
+    not `productName` - both prior guesses left every item's variants
+    parsing as empty. `brand` is a real top-level field Swiggy does send;
+    an earlier assumption that it never appears here was wrong.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    product_name: str = Field(alias="productName")
+    product_name: str = Field(alias="displayName")
+    brand: str | None = None
     category: str | None = None
-    variants: list[GoToItemVariant] = Field(default_factory=list)
+    variants: list[GoToItemVariant] = Field(default_factory=list, alias="variations")
 
 
 class OrderTracking(BaseModel):
@@ -293,12 +317,7 @@ class OrderTracking(BaseModel):
 
 
 class PreferenceSignal(BaseModel):
-    """A normalized preference signal consumed by variant selection (R4.3).
-
-    `brand` is always `None` when built from `GoToItem` data - `GoToItem`
-    carries no brand field. The field exists to match the shape the
-    variant-selection consumer expects, not because this source populates it.
-    """
+    """A normalized preference signal consumed by variant selection (R4.3)."""
 
     spin_id: str
     brand: str | None = None

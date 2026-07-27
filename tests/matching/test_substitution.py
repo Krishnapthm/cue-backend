@@ -390,6 +390,147 @@ async def test_product_name_falls_back_to_brand_then_ingredient_name(
     assert result.product_name == "Madhur"
 
 
+def test_select_preferred_candidate_defers_to_first_result_with_no_brand_match() -> (
+    None
+):
+    products = [
+        Product.model_validate(
+            {
+                "productId": "p-generic",
+                "name": "Generic Sugar",
+                "brand": "Generic",
+                "variants": [
+                    {"spinId": "spin-generic", "packSize": "1 kg", "price": "49.00"}
+                ],
+            }
+        ),
+        Product.model_validate(
+            {
+                "productId": "p-madhur",
+                "name": "Madhur Pure Sugar",
+                "brand": "Madhur",
+                "variants": [
+                    {"spinId": "spin-madhur", "packSize": "1 kg", "price": "62.00"}
+                ],
+            }
+        ),
+    ]
+
+    candidate = substitution.select_preferred_candidate(products)
+
+    assert candidate is not None
+    _, variant, _ = candidate
+    assert variant.spin_id == "spin-generic"
+
+
+def test_select_preferred_candidate_prefers_a_go_to_brand_over_first_result() -> None:
+    products = [
+        Product.model_validate(
+            {
+                "productId": "p-generic",
+                "name": "Generic Sugar",
+                "brand": "Generic",
+                "variants": [
+                    {"spinId": "spin-generic", "packSize": "1 kg", "price": "49.00"}
+                ],
+            }
+        ),
+        Product.model_validate(
+            {
+                "productId": "p-madhur",
+                "name": "Madhur Pure Sugar",
+                "brand": "Madhur",
+                "variants": [
+                    {"spinId": "spin-madhur", "packSize": "1 kg", "price": "62.00"}
+                ],
+            }
+        ),
+    ]
+
+    candidate = substitution.select_preferred_candidate(
+        products, preferred_brands=frozenset({"Madhur"})
+    )
+
+    assert candidate is not None
+    _, variant, _ = candidate
+    assert variant.spin_id == "spin-madhur"
+
+
+def test_select_preferred_candidate_ignores_unmatched_preferred_brands() -> None:
+    products = [
+        Product.model_validate(
+            {
+                "productId": "p-generic",
+                "name": "Generic Sugar",
+                "brand": "Generic",
+                "variants": [
+                    {"spinId": "spin-generic", "packSize": "1 kg", "price": "49.00"}
+                ],
+            }
+        )
+    ]
+
+    candidate = substitution.select_preferred_candidate(
+        products, preferred_brands=frozenset({"Madhur"})
+    )
+
+    assert candidate is not None
+    _, variant, _ = candidate
+    assert variant.spin_id == "spin-generic"
+
+
+def test_select_preferred_candidate_skips_out_of_stock_and_unpriced() -> None:
+    products = [
+        Product.model_validate(
+            {
+                "productId": "p-oos",
+                "name": "Out Of Stock",
+                "variants": [
+                    {"spinId": "spin-oos", "packSize": "1 kg", "inStock": False}
+                ],
+            }
+        ),
+        Product.model_validate(
+            {
+                "productId": "p-unpriced",
+                "name": "Unpriced",
+                "variants": [{"spinId": "spin-unpriced", "packSize": "1 kg"}],
+            }
+        ),
+        Product.model_validate(
+            {
+                "productId": "p-good",
+                "name": "Good Sugar",
+                "variants": [
+                    {"spinId": "spin-good", "packSize": "1 kg", "price": "50.00"}
+                ],
+            }
+        ),
+    ]
+
+    candidate = substitution.select_preferred_candidate(products)
+
+    assert candidate is not None
+    _, variant, _ = candidate
+    assert variant.spin_id == "spin-good"
+
+
+def test_select_preferred_candidate_returns_none_when_nothing_purchasable() -> None:
+    products = [
+        Product.model_validate(
+            {
+                "productId": "p-oos",
+                "name": "Out Of Stock",
+                "variants": [
+                    {"spinId": "spin-oos", "packSize": "1 kg", "inStock": False}
+                ],
+            }
+        )
+    ]
+
+    assert substitution.select_preferred_candidate(products) is None
+
+
 async def test_deterministic_across_repeated_calls(monkeypatch: Any) -> None:
     products = [
         Product.model_validate(
