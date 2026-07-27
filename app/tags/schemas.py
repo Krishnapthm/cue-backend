@@ -90,6 +90,66 @@ class TagResolveBatchResponse(BaseModel):
     results: list[TagResolution]
 
 
+class TagResolveRequest(BaseModel):
+    """Body of `POST /pantry/tags/resolve` - one tapped sticker (CUE-79).
+
+    Flat rather than a nested tap: this is the hot path during a scan, called
+    once per tap, and there is only ever one.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, str_strip_whitespace=True)
+
+    address_id: AddressId = Field(alias="addressId")
+    tag_uid: TagUid = Field(alias="tagUid")
+    text: TagText
+    quantity: TapQuantity = DEFAULT_TAP_QUANTITY
+
+    def as_tap(self) -> TagTap:
+        """View this request as the `TagTap` the shared resolution path takes.
+
+        Single-tap and batch resolution run the identical code below this
+        point; converting here is what keeps that true.
+        """
+        return TagTap(tag_uid=self.tag_uid, text=self.text, quantity=self.quantity)
+
+
+class TagCandidate(BaseModel):
+    """One alternative the same search turned up (CUE-79).
+
+    Purchasable by construction - in stock and priced - so `spin_id` and
+    `unit_price` are non-optional here even though they are nullable on
+    `TagResolution`, which also has to describe an `unresolved` tap.
+    `product_id` is carried because `PATCH /pantry/tags/{tag_uid}` takes it:
+    picking an alternative is a re-bind, and the app should not need a second
+    lookup to perform one.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    spin_id: str
+    product_id: str | None = None
+    product_name: str | None = None
+    refill_size: str | None = None
+    unit_price: Decimal
+
+
+class TagResolveResponse(TagResolution):
+    """Body of `POST /pantry/tags/resolve` - one resolution, plus alternates.
+
+    Extends `TagResolution` rather than restating it, so the single-tap and
+    batch payloads cannot drift; `candidates` is the only addition, and it is
+    deliberately absent from the batch response, which nothing renders a
+    picker from.
+
+    `candidates` is empty on a `cached` outcome: a cache hit issues no search,
+    so there is nothing to offer, and searching purely to fill this list would
+    turn a free rescan into a paid one. Clients must read empty as "no
+    alternatives to offer" and hide the picker, never as an error.
+    """
+
+    candidates: list[TagCandidate] = Field(default_factory=list)
+
+
 class TagBindingUpdate(BaseModel):
     """Body of `PATCH /pantry/tags/{tag_uid}` - re-bind to a chosen variant.
 
