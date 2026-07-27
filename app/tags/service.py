@@ -164,9 +164,10 @@ async def resolve_one(
 
     Returns:
         The resolution, plus the other purchasable candidates the search
-        turned up. `candidates` is empty on a `cached` outcome - no search
-        ran, so there is nothing to offer. A slug Swiggy has nothing for
-        comes back `unresolved` rather than raising.
+        turned up. On a `cached` outcome, no search ran, so `candidates`
+        holds only the bound variant itself - enough to always offer the
+        picker. A slug Swiggy has nothing for comes back `unresolved` rather
+        than raising.
 
     Raises:
         InstamartAuthError: If the user's Swiggy link is missing or expired
@@ -186,9 +187,9 @@ async def resolve_one(
 
     if cached is not None:
         # Answer entirely from the binding: no `your_go_to_items`, no
-        # `search_products`. Populating `candidates` here would mean searching
-        # anyway, which would defeat the cache and turn a free rescan into a
-        # paid one.
+        # `search_products`. `candidates` still carries the bound variant
+        # itself, so the picker always has something to show - re-searching
+        # for alternatives only happens if the user actually opens it.
         resolution, _ = await _resolve_tap(
             session,
             user_id=user_id,
@@ -202,7 +203,18 @@ async def resolve_one(
         )
         await _stamp_used(session, user_id, [tap.tag_uid])
         await session.commit()
-        return _with_candidates(resolution, [])
+        return TagResolveResponse(
+            **resolution.model_dump(),
+            candidates=[
+                TagCandidate(
+                    spin_id=cached.spin_id,
+                    product_id=cached.product_id,
+                    product_name=cached.product_name,
+                    refill_size=cached.refill_size,
+                    unit_price=cached.unit_price,
+                )
+            ],
+        )
 
     preferred_brands = await _cached_preferred_brands(session, user_id, address_id)
     products = (await _search_slugs(session, user_id, address_id, [slug])).get(slug, [])

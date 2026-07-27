@@ -91,20 +91,20 @@ async def test_a_second_tap_of_the_same_tag_is_cached_without_searching(
     assert len(instamart.tool_calls(TOOL_SEARCH_PRODUCTS)) == searches_after_first
 
 
-async def test_a_cache_hit_offers_no_candidates_and_issues_no_search(
+async def test_a_cache_hit_still_offers_the_bound_variant_and_issues_no_search(
     db_session: AsyncSession, linked_user: User, instamart: InstamartToolCallStub
 ) -> None:
     instamart.configure_search_query("sugar", search_result(MADHUR_SUGAR, CHEAP_SUGAR))
-    await service.resolve_one(db_session, linked_user.id, one())
+    first = await service.resolve_one(db_session, linked_user.id, one())
     searches_after_first = len(instamart.tool_calls(TOOL_SEARCH_PRODUCTS))
 
     second = await service.resolve_one(db_session, linked_user.id, one())
 
-    # Empty means "no alternatives to offer", not an error - and crucially no
-    # search was issued to fill it, which would turn a free rescan into a
-    # paid one.
+    # The bound variant itself is still offered, so the picker always has
+    # something to show - but crucially no search was issued to fill it,
+    # which would turn a free rescan into a paid one.
     assert second.outcome is TagOutcome.CACHED
-    assert second.candidates == []
+    assert [candidate.spin_id for candidate in second.candidates] == [first.spin_id]
     assert len(instamart.tool_calls(TOOL_SEARCH_PRODUCTS)) == searches_after_first
 
 
