@@ -1,11 +1,17 @@
-"""NFC tag API endpoints (CUE-74).
+"""NFC tag API endpoints (CUE-74, CUE-79).
 
-`resolve-batch` is the only route on the scan path, and it is called once,
-after the user has finished tapping - never per tap. The correction routes
-are off every hot path.
+`resolve` is the scan hot path, called once per tap: the app lands the row
+immediately as a skeleton and fills it in when this answers, so nothing
+blocks the next tap and the user sees the real product while the jar is still
+in their hand. `resolve-batch` is the reconciliation call at Add to cart -
+the finished set goes up, and any tap that failed or happened offline gets a
+second chance before the cart write. Both are cheap to keep: binding is an
+upsert keyed on `(user_id, tag_uid)`, so a tag already resolved per-tap comes
+back `cached` from the batch at no upstream cost. The correction routes are
+off every hot path.
 
-Every route is scoped to the Firebase-authenticated caller: batch resolution
-reads and writes only that user's bindings, and `{tag_uid}` resolves through
+Every route is scoped to the Firebase-authenticated caller: resolution reads
+and writes only that user's bindings, and `{tag_uid}` resolves through
 `owned_tag_binding`, which 404s on a tag the caller has not bound.
 """
 
@@ -25,6 +31,8 @@ from app.tags.schemas import (
     TagBindingUpdate,
     TagResolveBatchRequest,
     TagResolveBatchResponse,
+    TagResolveRequest,
+    TagResolveResponse,
 )
 
 router = APIRouter(prefix="/pantry/tags", tags=["tags"])
@@ -41,6 +49,32 @@ _NOT_FOUND: _Responses = {
         "description": "No binding for that tag, or it is not the caller's."
     }
 }
+
+
+@router.post(
+    "/resolve",
+    response_model=TagResolveResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resolve one tapped NFC tag to an orderable Instamart variant",
+    responses={
+        **_UNAUTHENTICATED,
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "description": "The tap is missing its uid, text or address."
+        },
+        status.HTTP_502_BAD_GATEWAY: {"description": "Swiggy could not be reached."},
+    },
+)
+async def resolve(
+    request: TagResolveRequest, user: CurrentUser, session: DbSession
+) -> TagResolveResponse:
+    """Resolve a single tap, and offer the alternatives it beat.
+
+    A slug Swiggy has nothing for comes back with outcome `unresolved` inside
+    a normal 200. `candidates` is empty on a `cached` outcome - no search ran,
+    so there are no alternatives to offer, and the picker should be hidden
+    rather than treated as an error.
+    """
+    return await service.resolve_one(session, user.id, request)
 
 
 @router.post(

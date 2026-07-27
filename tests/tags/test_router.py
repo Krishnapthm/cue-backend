@@ -17,13 +17,23 @@ MADHUR_SUGAR = product(
     price="62.00",
 )
 
+GENERIC_SUGAR = product(
+    product_id="p-sugar-generic",
+    name="Generic Sugar",
+    spin_id="spin-generic",
+    price="49.00",
+)
+
 SCAN = {
     "addressId": ADDRESS_ID,
     "taps": [{"tagUid": "04a2", "text": "sugar", "quantity": 2}],
 }
 
+TAP = {"addressId": ADDRESS_ID, "tagUid": "04a2", "text": "sugar", "quantity": 2}
+
 
 async def test_every_route_requires_authentication(client: httpx.AsyncClient) -> None:
+    assert (await client.post("/pantry/tags/resolve", json=TAP)).status_code == 401
     assert (
         await client.post("/pantry/tags/resolve-batch", json=SCAN)
     ).status_code == 401
@@ -31,6 +41,93 @@ async def test_every_route_requires_authentication(client: httpx.AsyncClient) ->
         await client.patch("/pantry/tags/04a2", json={"spinId": "s", "addressId": "a"})
     ).status_code == 401
     assert (await client.delete("/pantry/tags/04a2")).status_code == 401
+
+
+async def test_resolve_returns_one_resolution_with_its_alternates(
+    authed_client: httpx.AsyncClient, instamart: InstamartToolCallStub
+) -> None:
+    instamart.configure_search_query(
+        "sugar", search_result(MADHUR_SUGAR, GENERIC_SUGAR)
+    )
+
+    response = await authed_client.post("/pantry/tags/resolve", json=TAP)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tag_uid": "04a2",
+        "text": "sugar",
+        "outcome": "bound",
+        "spin_id": "spin-madhur",
+        "product_id": "p-sugar-madhur",
+        "product_name": "Madhur Pure Sugar",
+        "refill_size": "1 kg",
+        "unit_price": "62.00",
+        "in_stock": True,
+        "pantry_item_id": None,
+        "quantity": 2,
+        "candidates": [
+            {
+                "spin_id": "spin-madhur",
+                "product_id": "p-sugar-madhur",
+                "product_name": "Madhur Pure Sugar",
+                "refill_size": "1 kg",
+                "unit_price": "62.00",
+            },
+            {
+                "spin_id": "spin-generic",
+                "product_id": "p-sugar-generic",
+                "product_name": "Generic Sugar",
+                "refill_size": "1 kg",
+                "unit_price": "49.00",
+            },
+        ],
+    }
+
+
+async def test_resolve_batch_response_is_unchanged_by_the_single_tap_endpoint(
+    authed_client: httpx.AsyncClient, instamart: InstamartToolCallStub
+) -> None:
+    """`candidates` belongs to the picker, and nothing renders one from a batch."""
+    instamart.configure_search_query("sugar", search_result(MADHUR_SUGAR))
+
+    response = await authed_client.post("/pantry/tags/resolve-batch", json=SCAN)
+
+    assert "candidates" not in response.json()["results"][0]
+
+
+async def test_a_single_unresolvable_tap_is_a_200_not_an_error(
+    authed_client: httpx.AsyncClient, instamart: InstamartToolCallStub
+) -> None:
+    instamart.configure_search_query("gulkand", search_result())
+
+    response = await authed_client.post(
+        "/pantry/tags/resolve",
+        json={"addressId": ADDRESS_ID, "tagUid": "04b7", "text": "gulkand"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["outcome"] == "unresolved"
+    assert body["spin_id"] is None
+    assert body["product_name"] is None
+    assert body["candidates"] == []
+    # Quantity defaults to one refill per tap.
+    assert body["quantity"] == 1
+
+
+async def test_a_tap_without_text_or_address_is_rejected(
+    authed_client: httpx.AsyncClient,
+) -> None:
+    blank_text = await authed_client.post(
+        "/pantry/tags/resolve",
+        json={"addressId": ADDRESS_ID, "tagUid": "04a2", "text": "  "},
+    )
+    no_address = await authed_client.post(
+        "/pantry/tags/resolve", json={"tagUid": "04a2", "text": "sugar"}
+    )
+
+    assert blank_text.status_code == 422
+    assert no_address.status_code == 422
 
 
 async def test_resolve_batch_returns_one_entry_per_tap(

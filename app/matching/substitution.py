@@ -124,6 +124,64 @@ def rank_candidates(
     return candidates
 
 
+def purchasable_candidates(products: list[Product]) -> list[RankedCandidate]:
+    """Flatten search results to the candidates that can actually be bought.
+
+    Purchasable means in stock and priced: a variant missing either is not
+    orderable, so it is dropped rather than ranked last. Order is Swiggy's
+    own - products in the order it returned them, variants in the order they
+    appeared on each product - which is the order
+    `select_preferred_candidate` considers them in, and therefore the order
+    the "Not what you wanted?" picker offers them in (CUE-79).
+
+    Args:
+        products: Whatever `search_products` returned for the term.
+
+    Returns:
+        Every purchasable candidate, in Swiggy's own order. Empty when
+        nothing in `products` is orderable.
+    """
+    return [
+        (product, variant, variant.price)
+        for product in products
+        for variant in product.variants
+        if variant.in_stock is True and variant.price is not None
+    ]
+
+
+def prefer_by_brand(
+    purchasable: list[RankedCandidate],
+    *,
+    preferred_brands: frozenset[str] = frozenset(),
+) -> RankedCandidate | None:
+    """Pick the winner out of an already-collected purchasable list.
+
+    Split out of `select_preferred_candidate` so a caller that also needs the
+    full candidate list (CUE-79's single-tap picker) can get both from one
+    traversal without re-deriving either. The choice itself is made here and
+    nowhere else: two rankers that could disagree about what a slug resolves
+    to is exactly the drift this codebase is most exposed to.
+
+    Args:
+        purchasable: The output of `purchasable_candidates`.
+        preferred_brands: Brands the user has ordered before, from
+            `your_go_to_items`.
+
+    Returns:
+        The winning candidate, or `None` if `purchasable` is empty.
+    """
+    if not purchasable:
+        return None
+
+    if preferred_brands:
+        for candidate in purchasable:
+            product, _, _ = candidate
+            if product.brand and product.brand in preferred_brands:
+                return candidate
+
+    return purchasable[0]
+
+
 def select_preferred_candidate(
     products: list[Product],
     *,
@@ -150,22 +208,9 @@ def select_preferred_candidate(
         The winning candidate, or `None` if nothing in `products` is
         purchasable (in stock, with a price).
     """
-    purchasable = [
-        (product, variant, variant.price)
-        for product in products
-        for variant in product.variants
-        if variant.in_stock is True and variant.price is not None
-    ]
-    if not purchasable:
-        return None
-
-    if preferred_brands:
-        for candidate in purchasable:
-            product, _, _ = candidate
-            if product.brand and product.brand in preferred_brands:
-                return candidate
-
-    return purchasable[0]
+    return prefer_by_brand(
+        purchasable_candidates(products), preferred_brands=preferred_brands
+    )
 
 
 def _describe_substitution(

@@ -1,10 +1,15 @@
-"""Batch NFC slug resolution and tag-binding storage (CUE-74).
+"""NFC slug resolution and tag-binding storage (CUE-74, CUE-79).
 
 Deterministic and agent-free by construction: nothing in this module imports
-`app.agent`, and resolution is search-and-rank, never a model call. A scan is
-a physical rhythm - the user taps jars and expects rows instantly - so the
-backend is involved exactly once, when they finish, and answers a whole batch
-in one request.
+`app.agent`, and resolution is search-and-rank, never a model call.
+
+Two entry points, one resolution path. `resolve_one` answers a single tap
+while the user still has the jar in their hand, so the row can show the real
+product rather than a prettified slug; `resolve_batch` answers a finished
+scan in one request and remains the reconciliation call at Add to cart, where
+anything a tap failed to resolve gets a second chance. Both funnel through
+`_resolve_tap`, so the two can never disagree about what a slug resolves to -
+a second ranking path is the drift this module is most exposed to.
 
 Every read and write is scoped by `user_id`; a tag UID is only ever looked up
 together with its owner, so one household's sticker can never resolve against
@@ -34,12 +39,16 @@ from app.models.pantry import PantryItem
 from app.models.tag import TagBinding
 from app.pantry import service as pantry_service
 from app.providers import service as provider_service
-from app.tags.constants import SEARCH_CONCURRENCY, TagOutcome
+from app.tags.cache import go_to_brands as go_to_brands_cache
+from app.tags.constants import MAX_CANDIDATES, SEARCH_CONCURRENCY, TagOutcome
 from app.tags.exceptions import TagBindingNotFoundError
 from app.tags.schemas import (
     TagBindingUpdate,
+    TagCandidate,
     TagResolution,
     TagResolveBatchRequest,
+    TagResolveRequest,
+    TagResolveResponse,
     TagTap,
 )
 
@@ -110,33 +119,108 @@ async def resolve_batch(
     results: list[TagResolution] = []
     for tap in request.taps:
         slug = slugs[tap.tag_uid]
-        cached = reusable.get(tap.tag_uid)
-        if cached is not None:
-            results.append(_from_binding(cached, tap, TagOutcome.CACHED))
-            continue
-
-        best = substitution.select_preferred_candidate(
-            candidates_by_slug.get(slug, []),
-            preferred_brands=preferred_brands,
-        )
-        if best is None:
-            results.append(_unresolved(tap))
-            continue
-
-        binding = await _bind(
+        # Candidates are discarded here on purpose: nothing renders an
+        # alternates picker from a batch result, and the batch response shape
+        # is unchanged by CUE-79.
+        resolution, _ = await _resolve_tap(
             session,
             user_id=user_id,
             tap=tap,
             slug=slug,
             address_id=address_id,
-            best=best,
+            cached=reusable.get(tap.tag_uid),
+            products=candidates_by_slug.get(slug, []),
+            preferred_brands=preferred_brands,
             pantry_item_id=pantry_item_ids.get(slug),
         )
-        results.append(_from_binding(binding, tap, TagOutcome.BOUND))
+        results.append(resolution)
 
     await _stamp_used(session, user_id, list(reusable))
     await session.commit()
     return results
+
+
+async def resolve_one(
+    session: AsyncSession, user_id: int, request: TagResolveRequest
+) -> TagResolveResponse:
+    """Resolve a single tapped sticker, immediately, with its alternates.
+
+    The hot path during a scan. The row lands the moment the tag is read and
+    fills in when this answers, so the user sees the product they will
+    actually be charged for - "Fortune, not Tata" - while the jar is still in
+    their hand, rather than discovering it after the screen has closed.
+
+    Costs nothing upstream on a repeat tap of a tag already bound at this
+    address, and at most one `search_products` otherwise. The go-to brand set
+    is cached per `(user_id, address_id)` for a few minutes (`app.tags.cache`)
+    so a 10-jar scan does not fetch `your_go_to_items` ten times.
+
+    Args:
+        session: An active database session.
+        user_id: The scanning user; the binding read and written is scoped to
+            them.
+        request: The tapped tag, its slug, the quantity, and the address
+            being ordered to.
+
+    Returns:
+        The resolution, plus the other purchasable candidates the search
+        turned up. `candidates` is empty on a `cached` outcome - no search
+        ran, so there is nothing to offer. A slug Swiggy has nothing for
+        comes back `unresolved` rather than raising.
+
+    Raises:
+        InstamartAuthError: If the user's Swiggy link is missing or expired
+            and a search was needed to answer.
+    """
+    tap = request.as_tap()
+    address_id = request.address_id
+    slug = pantry_service.normalize_name(tap.text)
+
+    bindings = await _load_bindings(session, user_id, [tap.tag_uid])
+    binding = bindings.get(tap.tag_uid)
+    # Same address-scoped cache rule as the batch path: a variant orderable
+    # at one address may not be orderable at another, so an address change
+    # is a miss.
+    reusable = binding is not None and binding.address_id == address_id
+    cached = binding if reusable else None
+
+    if cached is not None:
+        # Answer entirely from the binding: no `your_go_to_items`, no
+        # `search_products`. Populating `candidates` here would mean searching
+        # anyway, which would defeat the cache and turn a free rescan into a
+        # paid one.
+        resolution, _ = await _resolve_tap(
+            session,
+            user_id=user_id,
+            tap=tap,
+            slug=slug,
+            address_id=address_id,
+            cached=cached,
+            products=[],
+            preferred_brands=frozenset(),
+            pantry_item_id=None,
+        )
+        await _stamp_used(session, user_id, [tap.tag_uid])
+        await session.commit()
+        return _with_candidates(resolution, [])
+
+    preferred_brands = await _cached_preferred_brands(session, user_id, address_id)
+    products = (await _search_slugs(session, user_id, address_id, [slug])).get(slug, [])
+    pantry_item_ids = await _pantry_item_ids(session, user_id, {slug})
+
+    resolution, candidates = await _resolve_tap(
+        session,
+        user_id=user_id,
+        tap=tap,
+        slug=slug,
+        address_id=address_id,
+        cached=None,
+        products=products,
+        preferred_brands=preferred_brands,
+        pantry_item_id=pantry_item_ids.get(slug),
+    )
+    await session.commit()
+    return _with_candidates(resolution, candidates)
 
 
 async def get_binding(session: AsyncSession, user_id: int, tag_uid: str) -> TagBinding:
@@ -201,6 +285,127 @@ async def unbind(session: AsyncSession, binding: TagBinding) -> None:
     """
     await session.delete(binding)
     await session.commit()
+
+
+async def _resolve_tap(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    tap: TagTap,
+    slug: str,
+    address_id: str,
+    cached: TagBinding | None,
+    products: list[Product],
+    preferred_brands: frozenset[str],
+    pantry_item_id: int | None,
+) -> tuple[TagResolution, list[RankedCandidate]]:
+    """Resolve exactly one tap. The single decision point for both endpoints.
+
+    Every "which variant does this slug mean?" answer in the tag surface is
+    made here, from `substitution.prefer_by_brand` over
+    `substitution.purchasable_candidates`. `resolve_one` and `resolve_batch`
+    differ only in how they gather the inputs - bindings, search results,
+    brand preferences - never in how they choose, which is what lets the
+    single-tap and batch paths be asserted identical.
+
+    Does not commit; the caller owns the transaction boundary.
+
+    Returns:
+        The resolution, and the purchasable candidates it was chosen from -
+        empty on a cache hit (nothing was searched) and on an unresolved slug
+        (nothing was purchasable). The winner is always among them, even when
+        it ranked below `MAX_CANDIDATES`.
+    """
+    if cached is not None:
+        return _from_binding(cached, tap, TagOutcome.CACHED), []
+
+    purchasable = substitution.purchasable_candidates(products)
+    best = substitution.prefer_by_brand(purchasable, preferred_brands=preferred_brands)
+    if best is None:
+        return _unresolved(tap), []
+
+    binding = await _bind(
+        session,
+        user_id=user_id,
+        tap=tap,
+        slug=slug,
+        address_id=address_id,
+        best=best,
+        pantry_item_id=pantry_item_id,
+    )
+    return _from_binding(binding, tap, TagOutcome.BOUND), _capped(purchasable, best)
+
+
+def _capped(
+    purchasable: list[RankedCandidate], best: RankedCandidate
+) -> list[RankedCandidate]:
+    """Trim the alternates to `MAX_CANDIDATES`, always keeping the winner.
+
+    The picker is a short menu and this rides the scan hot path, but a list
+    that omitted the very variant the row is showing would be incoherent - so
+    a winner that ranked below the cut displaces the last entry instead of
+    being dropped. Relative order is Swiggy's own either way, since the
+    winner always sits after everything kept ahead of it.
+    """
+    kept = purchasable[:MAX_CANDIDATES]
+    winning_spin_id = best[1].spin_id
+    if any(variant.spin_id == winning_spin_id for _, variant, _ in kept):
+        return kept
+    return [*purchasable[: MAX_CANDIDATES - 1], best]
+
+
+def _with_candidates(
+    resolution: TagResolution, candidates: list[RankedCandidate]
+) -> TagResolveResponse:
+    """Widen a resolution into the single-tap response, alternates attached."""
+    return TagResolveResponse(
+        **resolution.model_dump(),
+        candidates=[
+            TagCandidate(
+                spin_id=variant.spin_id,
+                product_id=product.product_id,
+                product_name=product.name or product.brand,
+                refill_size=variant.pack_size,
+                unit_price=price,
+            )
+            for product, variant, price in candidates
+        ],
+    )
+
+
+async def _cached_preferred_brands(
+    session: AsyncSession, user_id: int, address_id: str
+) -> frozenset[str]:
+    """`_preferred_brands`, reused across the taps of one scan (CUE-79).
+
+    Only the single-tap path uses this: `resolve_batch` already fetches
+    `your_go_to_items` exactly once per request, and its behaviour is
+    unchanged by CUE-79.
+
+    A *failed* fetch is not cached. `_preferred_brands` degrades a failure to
+    an empty set, which is indistinguishable here from a household that
+    genuinely has no go-to brands, so caching it would silently drop brand
+    preference for the rest of the scan over one transient error. The cost of
+    not caching it is a retry on the next tap, which is what we want.
+    """
+    key = (user_id, address_id)
+    cached = go_to_brands_cache.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        items = await instamart_service.get_go_to_items(session, user_id, address_id)
+    except (InstamartTransportError, InstamartDomainError):
+        logger.warning(
+            "your_go_to_items failed for user %s; deferring to first search result",
+            user_id,
+            exc_info=True,
+        )
+        return frozenset()
+
+    brands = frozenset(item.brand for item in items if item.brand)
+    go_to_brands_cache.set(key, brands)
+    return brands
 
 
 async def _load_bindings(

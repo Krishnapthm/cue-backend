@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -18,6 +18,7 @@ from app.models.provider import ProviderLink
 from app.models.user import User
 from app.providers import service as provider_service
 from app.providers.constants import PROVIDER
+from app.tags.cache import go_to_brands
 from tests.conftest import INSTAMART_ACCESS_TOKEN, InstamartToolCallStub
 
 ADDRESS_ID = "addr-1"
@@ -79,6 +80,19 @@ def instamart(mock_instamart_tool_call: InstamartToolCallStub) -> InstamartToolC
     """The Swiggy MCP stub, defaulting to an empty go-to list and no results."""
     mock_instamart_tool_call.configure(result={"structuredContent": {}})
     return mock_instamart_tool_call
+
+
+@pytest.fixture(autouse=True)
+def _clear_go_to_brands_cache() -> Generator[None]:
+    """Keep the process-wide go-to brand cache (CUE-79) out of other tests.
+
+    It is deliberately in-process and outlives a request, so without this a
+    test that resolves a tap would leak its brand set into the next test that
+    happened to reuse the same user id and address.
+    """
+    go_to_brands.clear()
+    yield
+    go_to_brands.clear()
 
 
 @pytest_asyncio.fixture

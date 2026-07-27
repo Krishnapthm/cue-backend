@@ -34,6 +34,23 @@ MAX_TAPS_PER_BATCH = 50
 # whole per-minute quota on a single request.
 SEARCH_CONCURRENCY = 5
 
+# Ceiling on the alternates offered alongside a single-tap resolution
+# (CUE-79). The picker is a short menu, not a catalogue, and the payload sits
+# on the scan hot path - but the winner is always among them, even when it
+# ranked below the cut.
+MAX_CANDIDATES = 10
+
+# How long a user's go-to brand set stays reusable across taps of one scan
+# (CUE-79). Per-tap resolution would otherwise fetch `your_go_to_items` once
+# per tap, doubling a 10-jar scan's upstream cost; a household's go-to brands
+# do not change mid-scan, so a few minutes of staleness is free.
+GO_TO_BRANDS_TTL_SECONDS = 300.0
+
+# Ceiling on cached brand sets, so a long-lived process serving many users
+# cannot grow the cache without bound. Expired entries are swept on insert;
+# this is the backstop when every entry is still live.
+GO_TO_BRANDS_CACHE_MAX_ENTRIES = 1024
+
 # Column length ceilings, mirrored by the check constraints on `tag_binding`
 # and by the request schemas, so an over-long value is a 422 rather than a
 # constraint violation.
