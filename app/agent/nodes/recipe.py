@@ -115,6 +115,14 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
         total `AgentState` TypedDict under strict typing. `messages` is
         appended, not overwritten, by the `add_messages` reducer.
 
+        `have_marks` is cleared, because a new recipe means a new checklist.
+        The field survives in the checkpoint across turns, and
+        `normalize_ingredients_node` treats a non-empty `have_marks` as the
+        user's own answer and skips the pantry seed on that basis - so leaving
+        the *previous* turn's marks in place would suppress seeding on every
+        turn after the first, and let a mark meant for one dish decide an
+        identically named ingredient in another.
+
     Raises:
         ValueError: `state["messages"]` is empty, so there is no dish name to
             extract.
@@ -159,7 +167,11 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
         # schema; this guards that contract defensively at runtime.
         raise RecipeGenerationError()
 
-    return {"recipe": recipe, "messages": [AIMessage(content=render_recipe(recipe))]}
+    return {
+        "recipe": recipe,
+        "messages": [AIMessage(content=render_recipe(recipe))],
+        "have_marks": set(),
+    }
 
 
 _PHOTO_SYSTEM_PROMPT = (
@@ -249,9 +261,10 @@ async def parse_recipe_photo_node(state: AgentState) -> dict[str, Any]:
             a non-empty Supabase Storage object path.
 
     Returns:
-        A partial state update containing the parsed `recipe`. This is a
-        partial dict rather than a full `AgentState` (see
-        `generate_recipe_node`'s docstring for why).
+        A partial state update containing the parsed `recipe`, and a cleared
+        `have_marks` for the reason `generate_recipe_node`'s docstring gives.
+        This is a partial dict rather than a full `AgentState` (see that
+        docstring for why).
 
     Raises:
         ValueError: `state["image_object_path"]` is missing or empty, so
@@ -317,4 +330,4 @@ async def parse_recipe_photo_node(state: AgentState) -> dict[str, Any]:
         # schema; this guards that contract defensively at runtime.
         raise RecipeGenerationError()
 
-    return {"recipe": recipe}
+    return {"recipe": recipe, "have_marks": set()}

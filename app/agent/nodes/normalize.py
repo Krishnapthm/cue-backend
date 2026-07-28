@@ -1,22 +1,70 @@
+"""Reshape a generated recipe into the have/need checklist (CUE-24, CUE-89).
+
+CUE-24 built the reshaping; CUE-89 wired the node into the graph and gave it
+the one behaviour that makes the checklist worth showing - the user's pantry
+seeds it, so the staples they already keep arrive already ticked instead of
+being re-ticked by hand on every single turn.
+"""
+
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+from langgraph.runtime import Runtime
+
+from app.agent.context import CueContext
 from app.agent.schemas import IngredientStatus, NormalizedIngredient
 from app.agent.state import AgentState
+from app.pantry import service as pantry_service
+from app.pantry.service import normalize_name
 
 logger = logging.getLogger(__name__)
 
 
-def normalize_ingredients_node(state: AgentState) -> dict[str, Any]:
+async def _seed_have_marks(
+    recipe_names: list[str], runtime: Runtime[CueContext]
+) -> set[str]:
+    """Pre-mark the recipe's ingredients the user's pantry says they have.
+
+    Matching is exact on `pantry.service.normalize_name`'s form, which is the
+    codebase's single definition of "the same item" - the same rule
+    `stamp_last_bought` already matches ingredient names to staples with. A
+    second, looser scheme here (substrings, stemming, edit distance) would be a
+    second definition of the same thing, free to disagree with the first.
+
+    Exact-on-normalized deliberately **under**-matches: "rice" does not match
+    the staple "basmati rice". That is the right direction to be wrong in. A
+    missed match costs the user one tick; a false HAVE silently drops an
+    ingredient from the order and they find out at the stove.
+
+    Args:
+        recipe_names: The recipe's ingredient names, as the recipe spells them.
+        runtime: The turn's runtime context, for the request's session and user.
+
+    Returns:
+        The subset of `recipe_names` that matched an in-stock staple, spelled
+        as the *recipe* spells them - `have_marks` is keyed on ingredient
+        names, so the pantry's spelling would never match anything downstream.
+    """
+    stocked = await pantry_service.stocked_names(
+        runtime.context.session, runtime.context.user_id
+    )
+    if not stocked:
+        return set()
+    return {name for name in recipe_names if normalize_name(name) in stocked}
+
+
+async def normalize_ingredients_node(
+    state: AgentState, runtime: Runtime[CueContext]
+) -> dict[str, Any]:
     """Reshape `GeneratedRecipe.ingredients` into structured have/need rows.
 
     Deterministic, not model-driven: maps `state["recipe"].ingredients` (from
     either intake path - CUE-22 dish-name generation or CUE-23 photo parse,
-    both produce a `GeneratedRecipe`) plus the have-list checkbox state
-    already captured in `state["have_marks"]` into
-    `list[NormalizedIngredient]`. Every source ingredient produces a row -
+    both produce a `GeneratedRecipe`) plus the have-list checkbox state in
+    `state["have_marks"]` into `list[NormalizedIngredient]`. Every source
+    ingredient produces a row -
     `HAVE` rows are kept for display, and only `NEED` rows are later handed
     to matching (the caller filters on `status`, not this node).
 
@@ -40,17 +88,39 @@ def normalize_ingredients_node(state: AgentState) -> dict[str, Any]:
         is silently ignored (it just never marks anything) - it never
         raises.
 
+    Where `have_marks` comes from, and who wins:
+
+      - The user's marks are authoritative. If `have_marks` already carries
+        values - a resume of `confirm_checklist`, or an explicit client
+        submission - they are used exactly as given and the pantry is not even
+        read. Pantry state is a suggestion about what is in the cupboard; the
+        user's answer is the fact, and re-applying the suggestion on top of it
+        would silently re-tick a staple the user had just unticked because they
+        ran out.
+      - Otherwise the marks are seeded from the pantry, so the obvious things
+        arrive already ticked. See `_seed_have_marks` for the matching rule and
+        why it errs towards NEED.
+
+    The seeded set is returned in the state update, not just used locally:
+    `confirm_checklist` (CUE-90) interrupts with this checklist and resumes by
+    overwriting the same field, so the seed has to be the visible starting
+    value of the thing the user is about to edit.
+
     Args:
         state: The current graph state. Must have `recipe` set to a
-            `GeneratedRecipe`; `have_marks` is optional and defaults to an
-            empty set when absent.
+            `GeneratedRecipe`; `have_marks` is optional and is seeded from the
+            pantry when absent or empty.
+        runtime: The turn's runtime context, carrying the request's database
+            session and user. The pantry read goes through it rather than
+            through state, because an `AsyncSession` can never be checkpointed
+            - see `app/agent/context.py`.
 
     Returns:
-        A partial state update containing `normalized_ingredients`. This is
-        a partial dict rather than a full `AgentState` (LangGraph's node
-        convention, see `smoke_test_node` in `app/agent/graph.py`) - a
-        partial dict cannot satisfy the total `AgentState` TypedDict under
-        strict typing.
+        A partial state update containing `normalized_ingredients` and the
+        `have_marks` they were derived from. This is a partial dict rather
+        than a full `AgentState` (LangGraph's node convention) - a partial
+        dict cannot satisfy the total `AgentState` TypedDict under strict
+        typing.
 
     Raises:
         ValueError: `state["recipe"]` is missing or `None`, so there is
@@ -61,7 +131,23 @@ def normalize_ingredients_node(state: AgentState) -> dict[str, Any]:
         raise ValueError(
             "Cannot normalize ingredients: state has no recipe to normalize."
         )
+
     have_marks = state.get("have_marks") or set()
+    if have_marks:
+        logger.debug(
+            "Session %s supplied %d have-marks; skipping the pantry seed.",
+            state["session_id"],
+            len(have_marks),
+        )
+    else:
+        have_marks = await _seed_have_marks(
+            [ingredient.name for ingredient in recipe.ingredients], runtime
+        )
+        logger.debug(
+            "Seeded %d have-marks from the pantry for session %s.",
+            len(have_marks),
+            state["session_id"],
+        )
 
     # name -> ordered list of unit buckets; each bucket accumulates the
     # quantities of every source row sharing that (name, unit) pair. Buckets
@@ -109,4 +195,4 @@ def normalize_ingredients_node(state: AgentState) -> dict[str, Any]:
         len(normalized),
         state["session_id"],
     )
-    return {"normalized_ingredients": normalized}
+    return {"normalized_ingredients": normalized, "have_marks": have_marks}

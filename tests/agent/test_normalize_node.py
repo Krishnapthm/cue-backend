@@ -1,16 +1,24 @@
-"""`normalize_ingredients_node`: have/need marking and duplicate-name merge
+"""`normalize_ingredients_node`: pantry seeding, and the duplicate-name merge
 rules.
 
-These are pure unit tests - no model, no network. `AgentState` literals are
-built directly with a `GeneratedRecipe`, mirroring `tests/agent/
-test_recipe_node.py`'s style.
+The merge rules are pure logic - no model, no network. The pantry seed is not:
+it reads the user's real `pantry_item` rows, so these run against the suite's
+ephemeral Postgres rather than a stubbed service. Every test therefore starts
+from a `user` whose pantry is empty and adds only what it needs, which is also
+what keeps them independent of each other on a database that is never
+truncated between tests.
 """
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from langchain_core.messages import HumanMessage
+from langgraph.runtime import Runtime
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.context import CueContext
 from app.agent.nodes.normalize import normalize_ingredients_node
 from app.agent.schemas import (
     GeneratedRecipe,
@@ -19,6 +27,10 @@ from app.agent.schemas import (
     RecipeIngredient,
 )
 from app.agent.state import AgentState
+from app.models.pantry import PantryItem
+from app.models.user import User
+from app.pantry.constants import LEVEL_MAX, LEVEL_MIN, PantryCategory
+from app.pantry.service import normalize_name
 
 
 def _recipe(ingredients: list[RecipeIngredient]) -> GeneratedRecipe:
@@ -45,122 +57,288 @@ def _state(
     return state
 
 
-def test_basic_have_and_need_split() -> None:
-    ingredients = [
+def _runtime(session: AsyncSession, user_id: int) -> Runtime[CueContext]:
+    """The runtime context an invocation supplies; the node reads the session."""
+    return Runtime(
+        context=CueContext(
+            session=session,
+            user_id=user_id,
+            chat_session_id=uuid.uuid4(),
+            address_id="addr-1",
+        )
+    )
+
+
+async def _stock(
+    session: AsyncSession, user_id: int, name: str, level: int = LEVEL_MAX
+) -> None:
+    """Put one staple in a user's pantry, at full level unless told otherwise."""
+    session.add(
+        PantryItem(
+            user_id=user_id,
+            name=name,
+            name_normalized=normalize_name(name),
+            category=PantryCategory.SPICES_AND_MASALAS.value,
+            level=level,
+        )
+    )
+    await session.commit()
+
+
+@pytest.fixture
+def salt_pepper_sugar() -> list[RecipeIngredient]:
+    return [
         RecipeIngredient(name="salt", quantity=1, unit="tsp"),
         RecipeIngredient(name="pepper", quantity=1, unit="tsp"),
         RecipeIngredient(name="sugar", quantity=2, unit="tbsp"),
     ]
-    state = _state(ingredients, have_marks={"pepper"})
 
-    update = normalize_ingredients_node(state)
 
-    normalized = update["normalized_ingredients"]
-    assert len(normalized) == 3
-    by_name = {row.name: row for row in normalized}
+# --- the pantry seed -------------------------------------------------------
+
+
+async def test_pantry_seeds_have_marks_with_no_client_input(
+    db_session: AsyncSession, user: User, salt_pepper_sugar: list[RecipeIngredient]
+) -> None:
+    await _stock(db_session, user.id, "Pepper")
+    state = _state(salt_pepper_sugar)
+    assert "have_marks" not in state
+
+    update = await normalize_ingredients_node(state, _runtime(db_session, user.id))
+
+    by_name = {row.name: row for row in update["normalized_ingredients"]}
     assert by_name["pepper"].status == IngredientStatus.HAVE
     assert by_name["salt"].status == IngredientStatus.NEED
     assert by_name["sugar"].status == IngredientStatus.NEED
+    # The seed is spelled as the *recipe* spells it, not as the pantry does -
+    # every downstream reader matches on ingredient names.
+    assert update["have_marks"] == {"pepper"}
 
-    need_only = [row for row in normalized if row.status == IngredientStatus.NEED]
-    assert len(need_only) == 2
-    assert {row.name for row in need_only} == {"salt", "sugar"}
+
+async def test_the_seed_matches_case_and_whitespace_insensitively(
+    db_session: AsyncSession, user: User
+) -> None:
+    await _stock(db_session, user.id, "  BASMATI   Rice ")
+    state = _state([RecipeIngredient(name="Basmati Rice", quantity=200, unit="g")])
+
+    update = await normalize_ingredients_node(state, _runtime(db_session, user.id))
+
+    assert update["normalized_ingredients"][0].status == IngredientStatus.HAVE
 
 
-def test_have_marks_entry_matching_nothing_is_ignored() -> None:
+async def test_a_near_miss_name_is_left_as_need(
+    db_session: AsyncSession, user: User
+) -> None:
+    # "rice" is a substring of the staple, and a looser matcher would tick it.
+    # Under-matching is the correct direction to be wrong in: a missed match
+    # costs one tick, a false HAVE silently drops an ingredient from the order.
+    await _stock(db_session, user.id, "basmati rice")
+    state = _state([RecipeIngredient(name="rice", quantity=200, unit="g")])
+
+    update = await normalize_ingredients_node(state, _runtime(db_session, user.id))
+
+    assert update["normalized_ingredients"][0].status == IngredientStatus.NEED
+    assert update["have_marks"] == set()
+
+
+async def test_an_out_of_stock_staple_does_not_seed(
+    db_session: AsyncSession, user: User
+) -> None:
+    # level 0 is "Out", which is precisely the staple that still needs buying.
+    await _stock(db_session, user.id, "salt", level=LEVEL_MIN)
+    state = _state([RecipeIngredient(name="salt", quantity=1, unit="tsp")])
+
+    update = await normalize_ingredients_node(state, _runtime(db_session, user.id))
+
+    assert update["normalized_ingredients"][0].status == IngredientStatus.NEED
+
+
+async def test_a_low_but_nonzero_staple_seeds(
+    db_session: AsyncSession, user: User
+) -> None:
+    await _stock(db_session, user.id, "salt", level=LEVEL_MIN + 1)
+    state = _state([RecipeIngredient(name="salt", quantity=1, unit="tsp")])
+
+    update = await normalize_ingredients_node(state, _runtime(db_session, user.id))
+
+    assert update["normalized_ingredients"][0].status == IngredientStatus.HAVE
+
+
+async def test_an_empty_pantry_leaves_every_row_need(
+    db_session: AsyncSession, user: User, salt_pepper_sugar: list[RecipeIngredient]
+) -> None:
+    update = await normalize_ingredients_node(
+        _state(salt_pepper_sugar), _runtime(db_session, user.id)
+    )
+
+    normalized = update["normalized_ingredients"]
+    assert len(normalized) == 3
+    assert all(row.status == IngredientStatus.NEED for row in normalized)
+    assert update["have_marks"] == set()
+
+
+async def test_another_users_pantry_never_seeds(
+    db_session: AsyncSession, user: User
+) -> None:
+    other = User(firebase_uid=f"firebase-uid-{uuid.uuid4()}", email="other@example.com")
+    db_session.add(other)
+    await db_session.commit()
+    await _stock(db_session, other.id, "salt")
+
+    update = await normalize_ingredients_node(
+        _state([RecipeIngredient(name="salt", quantity=1, unit="tsp")]),
+        _runtime(db_session, user.id),
+    )
+
+    assert update["normalized_ingredients"][0].status == IngredientStatus.NEED
+
+
+# --- the user's marks win --------------------------------------------------
+
+
+async def test_user_supplied_marks_override_the_pantry_seed(
+    db_session: AsyncSession, user: User, salt_pepper_sugar: list[RecipeIngredient]
+) -> None:
+    # The pantry says pepper is in stock; the user's answer says only sugar is.
+    # Re-applying the seed on top would re-tick a staple the user unticked
+    # because they had run out - and they would never get the pepper.
+    await _stock(db_session, user.id, "pepper")
+    state = _state(salt_pepper_sugar, have_marks={"sugar"})
+
+    update = await normalize_ingredients_node(state, _runtime(db_session, user.id))
+
+    by_name = {row.name: row for row in update["normalized_ingredients"]}
+    assert by_name["sugar"].status == IngredientStatus.HAVE
+    assert by_name["pepper"].status == IngredientStatus.NEED
+    assert by_name["salt"].status == IngredientStatus.NEED
+    assert update["have_marks"] == {"sugar"}
+
+
+async def test_empty_marks_are_treated_as_no_answer_and_seed(
+    db_session: AsyncSession, user: User
+) -> None:
+    # An empty set is the absence of an answer, not an answer of "none of them":
+    # `normalize_ingredients_node` is only reached before the user has been
+    # asked, so there is no answer to preserve here.
+    await _stock(db_session, user.id, "salt")
+    state = _state([RecipeIngredient(name="salt", quantity=1, unit="tsp")], set())
+
+    update = await normalize_ingredients_node(state, _runtime(db_session, user.id))
+
+    assert update["normalized_ingredients"][0].status == IngredientStatus.HAVE
+
+
+async def test_have_marks_entry_matching_nothing_is_ignored(
+    db_session: AsyncSession, user: User
+) -> None:
     ingredients = [
         RecipeIngredient(name="salt", quantity=1, unit="tsp"),
         RecipeIngredient(name="pepper", quantity=1, unit="tsp"),
     ]
     state = _state(ingredients, have_marks={"cardamom pods"})
 
-    update = normalize_ingredients_node(state)
+    update = await normalize_ingredients_node(state, _runtime(db_session, user.id))
 
     normalized = update["normalized_ingredients"]
     assert len(normalized) == 2
     assert all(row.status == IngredientStatus.NEED for row in normalized)
 
 
-def test_duplicate_name_same_unit_merges_and_sums_quantities() -> None:
+# --- the merge rules (unchanged by CUE-89) ---------------------------------
+
+
+async def test_duplicate_name_same_unit_merges_and_sums_quantities(
+    db_session: AsyncSession, user: User
+) -> None:
     ingredients = [
         RecipeIngredient(name="salt", quantity=1, unit="tsp"),
         RecipeIngredient(name="pepper", quantity=1, unit="tsp"),
         RecipeIngredient(name="salt", quantity=2, unit="tsp"),
     ]
-    state = _state(ingredients)
 
-    update = normalize_ingredients_node(state)
+    update = await normalize_ingredients_node(
+        _state(ingredients), _runtime(db_session, user.id)
+    )
 
-    normalized = update["normalized_ingredients"]
-    salt_rows = [row for row in normalized if row.name == "salt"]
+    salt_rows = [row for row in update["normalized_ingredients"] if row.name == "salt"]
     assert len(salt_rows) == 1
     assert salt_rows[0].quantity == 3
     assert salt_rows[0].unit == "tsp"
 
 
-def test_duplicate_name_different_units_kept_separate() -> None:
+async def test_duplicate_name_different_units_kept_separate(
+    db_session: AsyncSession, user: User
+) -> None:
     ingredients = [
         RecipeIngredient(name="salt", quantity=1, unit="tsp"),
         RecipeIngredient(name="salt", quantity=1, unit="g"),
     ]
-    state = _state(ingredients)
 
-    update = normalize_ingredients_node(state)
+    update = await normalize_ingredients_node(
+        _state(ingredients), _runtime(db_session, user.id)
+    )
 
-    normalized = update["normalized_ingredients"]
-    salt_rows = [row for row in normalized if row.name == "salt"]
+    salt_rows = [row for row in update["normalized_ingredients"] if row.name == "salt"]
     assert len(salt_rows) == 2
     assert {row.unit for row in salt_rows} == {"tsp", "g"}
     assert [row.quantity for row in salt_rows] == [1.0, 1.0]
 
 
-def test_duplicate_name_both_units_none_kept_separate() -> None:
+async def test_duplicate_name_both_units_none_kept_separate(
+    db_session: AsyncSession, user: User
+) -> None:
     ingredients = [
         RecipeIngredient(name="salt", quantity=1, unit=None),
         RecipeIngredient(name="salt", quantity=2, unit=None),
     ]
-    state = _state(ingredients)
 
-    update = normalize_ingredients_node(state)
+    update = await normalize_ingredients_node(
+        _state(ingredients), _runtime(db_session, user.id)
+    )
 
-    normalized = update["normalized_ingredients"]
-    salt_rows = [row for row in normalized if row.name == "salt"]
+    salt_rows = [row for row in update["normalized_ingredients"] if row.name == "salt"]
     assert len(salt_rows) == 2
     assert all(row.unit is None for row in salt_rows)
     assert sorted(row.quantity for row in salt_rows) == [1.0, 2.0]
 
 
-def test_duplicate_name_same_unit_one_quantity_none_merges_to_the_number() -> None:
+async def test_duplicate_name_same_unit_one_quantity_none_merges_to_the_number(
+    db_session: AsyncSession, user: User
+) -> None:
     ingredients = [
         RecipeIngredient(name="salt", quantity=None, unit="tsp"),
         RecipeIngredient(name="salt", quantity=5, unit="tsp"),
     ]
-    state = _state(ingredients)
 
-    update = normalize_ingredients_node(state)
+    update = await normalize_ingredients_node(
+        _state(ingredients), _runtime(db_session, user.id)
+    )
 
-    normalized = update["normalized_ingredients"]
-    salt_rows = [row for row in normalized if row.name == "salt"]
+    salt_rows = [row for row in update["normalized_ingredients"] if row.name == "salt"]
     assert len(salt_rows) == 1
     assert salt_rows[0].quantity == 5
 
 
-def test_duplicate_name_same_unit_all_quantities_none_stays_none() -> None:
+async def test_duplicate_name_same_unit_all_quantities_none_stays_none(
+    db_session: AsyncSession, user: User
+) -> None:
     ingredients = [
         RecipeIngredient(name="salt", quantity=None, unit="tsp"),
         RecipeIngredient(name="salt", quantity=None, unit="tsp"),
     ]
-    state = _state(ingredients)
 
-    update = normalize_ingredients_node(state)
+    update = await normalize_ingredients_node(
+        _state(ingredients), _runtime(db_session, user.id)
+    )
 
-    normalized = update["normalized_ingredients"]
-    salt_rows = [row for row in normalized if row.name == "salt"]
+    salt_rows = [row for row in update["normalized_ingredients"] if row.name == "salt"]
     assert len(salt_rows) == 1
     assert salt_rows[0].quantity is None
 
 
-def test_output_order_is_stable_first_appearance() -> None:
+async def test_output_order_is_stable_first_appearance(
+    db_session: AsyncSession, user: User
+) -> None:
     ingredients = [
         RecipeIngredient(name="salt", quantity=1, unit="tsp"),
         RecipeIngredient(name="pepper", quantity=1, unit="tsp"),
@@ -169,9 +347,11 @@ def test_output_order_is_stable_first_appearance() -> None:
         RecipeIngredient(name="salt", quantity=1, unit="tsp"),
     ]
     state = _state(ingredients)
+    runtime = _runtime(db_session, user.id)
 
-    update = normalize_ingredients_node(state)
-    normalized = update["normalized_ingredients"]
+    normalized = (await normalize_ingredients_node(state, runtime))[
+        "normalized_ingredients"
+    ]
 
     # salt's name is first-seen before pepper and sugar, so all of salt's
     # rows (grouped, unit-ordered by first appearance: tsp then g) come
@@ -183,32 +363,15 @@ def test_output_order_is_stable_first_appearance() -> None:
         ("sugar", "tbsp"),
     ]
 
-    # Determinism: running again on the same inputs yields an identical
-    # result.
-    update_again = normalize_ingredients_node(state)
-    assert update_again["normalized_ingredients"] == normalized
+    # Determinism: running again on the same inputs yields an identical result.
+    again = await normalize_ingredients_node(state, runtime)
+    assert again["normalized_ingredients"] == normalized
 
 
-def test_empty_have_marks_all_need() -> None:
-    ingredients = [RecipeIngredient(name="salt", quantity=1, unit="tsp")]
-    state = _state(ingredients, have_marks=set())
-
-    update = normalize_ingredients_node(state)
-
-    assert update["normalized_ingredients"][0].status == IngredientStatus.NEED
+# --- contract --------------------------------------------------------------
 
 
-def test_missing_have_marks_key_all_need() -> None:
-    ingredients = [RecipeIngredient(name="salt", quantity=1, unit="tsp")]
-    state = _state(ingredients)
-    assert "have_marks" not in state
-
-    update = normalize_ingredients_node(state)
-
-    assert update["normalized_ingredients"][0].status == IngredientStatus.NEED
-
-
-def test_raises_on_missing_recipe() -> None:
+async def test_raises_on_missing_recipe(db_session: AsyncSession, user: User) -> None:
     state: AgentState = {
         "session_id": "session-1",
         "user_id": 1,
@@ -216,16 +379,20 @@ def test_raises_on_missing_recipe() -> None:
     }
 
     with pytest.raises(ValueError, match="no recipe"):
-        normalize_ingredients_node(state)
+        await normalize_ingredients_node(state, _runtime(db_session, user.id))
 
 
-def test_returns_partial_update_shape() -> None:
+async def test_returns_partial_update_shape(
+    db_session: AsyncSession, user: User
+) -> None:
     ingredients = [RecipeIngredient(name="salt", quantity=1, unit="tsp")]
-    state = _state(ingredients)
 
-    update = normalize_ingredients_node(state)
+    update = await normalize_ingredients_node(
+        _state(ingredients), _runtime(db_session, user.id)
+    )
 
-    assert set(update.keys()) == {"normalized_ingredients"}
+    assert set(update.keys()) == {"normalized_ingredients", "have_marks"}
     normalized = update["normalized_ingredients"]
     assert isinstance(normalized, list)
     assert all(isinstance(row, NormalizedIngredient) for row in normalized)
+    assert isinstance(update["have_marks"], set)

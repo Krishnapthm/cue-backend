@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.cart import CartPlanItem
 from app.models.pantry import PantryItem
-from app.pantry.constants import CATEGORY_DISPLAY_ORDER
+from app.pantry.constants import CATEGORY_DISPLAY_ORDER, LEVEL_MIN
 from app.pantry.exceptions import PantryItemNameConflictError, PantryItemNotFoundError
 from app.pantry.schemas import PantryItemCreate, PantryItemUpdate
 
@@ -54,6 +54,34 @@ def normalize_name(raw: str) -> str:
         The normalized form. Empty if `raw` held no non-whitespace characters.
     """
     return " ".join(raw.split()).casefold()
+
+
+async def stocked_names(session: AsyncSession, user_id: int) -> set[str]:
+    """Return the normalized names of the staples the user still has in stock.
+
+    "In stock" is `level > 0`: the 0-3 scale's zero means Out, and an item the
+    user has marked Out is exactly the one they still need bought. The read
+    selects the single column it needs rather than hydrating `PantryItem` rows,
+    since the caller only ever asks the set for membership.
+
+    Returned in the normalized form so the caller compares like with like -
+    `normalize_name` is the one definition of "the same item" in this codebase,
+    and matching on `name` would make "Basmati Rice" and "basmati rice"
+    different staples again.
+
+    Args:
+        session: An active database session.
+        user_id: The owning Cue user.
+
+    Returns:
+        The normalized names of every in-stock staple. Empty for a user who
+        keeps no pantry, which is the normal state for a new account.
+    """
+    stmt = select(PantryItem.name_normalized).where(
+        PantryItem.user_id == user_id, PantryItem.level > LEVEL_MIN
+    )
+    result = await session.execute(stmt)
+    return set(result.scalars().all())
 
 
 async def list_items(session: AsyncSession, user_id: int) -> list[PantryItem]:

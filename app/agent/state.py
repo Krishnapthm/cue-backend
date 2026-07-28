@@ -40,11 +40,19 @@ class AgentState(TypedDict):
     extraction at the app/graph boundary is wired in a later issue (this
     field only defines the contract `parse_recipe_photo_node` reads from).
 
-    `have_marks` is the set of ingredient names the user checked as
-    already-owned on the have-list UI (client-side capture, out of scope
-    here). It is `NotRequired` for the same reason as `recipe` - most state
-    literals never touch it, and `normalize_ingredients_node` reads it via
-    `state.get("have_marks") or set()`.
+    `have_marks` is the set of ingredient names marked as already-owned for the
+    current recipe. It has two sources and a strict precedence between them:
+    the user's own answer (a `confirm_checklist` resume, or an explicit client
+    submission) always wins, and only when there is none does
+    `normalize_ingredients_node` seed it from the user's in-stock `PantryItem`
+    rows so the obvious staples arrive pre-ticked. Names are spelled as the
+    *recipe* spells them, not as the pantry does, since that is what every
+    reader matches against. It is `NotRequired` for the same reason as
+    `recipe`: most state literals never touch it.
+
+    The recipe-producing nodes clear it, because it outlives a turn in the
+    checkpoint while the checklist it describes does not - see
+    `generate_recipe_node`'s `Returns` for what goes wrong otherwise.
 
     `normalized_ingredients` is `normalize_ingredients_node`'s output: the
     same `GeneratedRecipe.ingredients` reshaped into `(name, quantity/unit,

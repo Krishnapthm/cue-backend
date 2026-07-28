@@ -11,6 +11,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.context import CueContext
 from app.agent.nodes.guardrail import refuse_node
+from app.agent.nodes.normalize import normalize_ingredients_node
 from app.agent.nodes.order_status import order_status_node
 from app.agent.nodes.recipe import generate_recipe_node, parse_recipe_photo_node
 from app.agent.nodes.route import route_turn
@@ -28,6 +29,7 @@ ROUTE_TURN = "route_turn"
 GENERATE_RECIPE = "generate_recipe"
 PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
+NORMALIZE_INGREDIENTS = "normalize_ingredients"
 REFUSE = "refuse"
 
 #: Nodes whose model output is prose meant for the user, and whose tokens may
@@ -47,7 +49,10 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     """Build the agent's (uncompiled) chat loop.
 
     ```
-    START -> route_turn --(recipe)-------> generate_recipe ---> END
+    START -> route_turn --(recipe)-------> generate_recipe
+                 |                               |
+                 |                               v
+                 |                      normalize_ingredients -> END
                  |
                  +-------(photo)--------> parse_recipe_photo -> END
                  |
@@ -58,7 +63,12 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
 
     Every turn enters through the router, which both labels the turn and
     picks its branch, so off-topic turns are turned away before any recipe
-    model call. `normalize_ingredients_node` stays unwired.
+    model call.
+
+    `generate_recipe -> normalize_ingredients` is a static edge: there is no
+    routing decision to make, every recipe turn produces a checklist. The
+    checklist is where `confirm_checklist` (CUE-90) will interrupt; until then
+    the branch ends there.
 
     There is deliberately **no** static edge out of `route_turn`: it routes
     with a `Command`, which adds a *dynamic* edge, and a static edge
@@ -90,9 +100,11 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_node(GENERATE_RECIPE, generate_recipe_node)
     builder.add_node(PARSE_RECIPE_PHOTO, parse_recipe_photo_node)
     builder.add_node(ORDER_STATUS, order_status_node)
+    builder.add_node(NORMALIZE_INGREDIENTS, normalize_ingredients_node)
     builder.add_node(REFUSE, refuse_node)
     builder.add_edge(START, ROUTE_TURN)
-    builder.add_edge(GENERATE_RECIPE, END)
+    builder.add_edge(GENERATE_RECIPE, NORMALIZE_INGREDIENTS)
+    builder.add_edge(NORMALIZE_INGREDIENTS, END)
     builder.add_edge(PARSE_RECIPE_PHOTO, END)
     builder.add_edge(ORDER_STATUS, END)
     builder.add_edge(REFUSE, END)
