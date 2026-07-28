@@ -11,12 +11,13 @@ import logging
 import uuid
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.graph import thread_config
+from app.agent.context import CueContext
+from app.agent.graph import CueGraph, thread_config
 from app.agent.state import AgentState
+from app.chat.constants import ADDRESS_REQUIRED_MESSAGE
 from app.chat.exceptions import ChatSessionNotFoundError
 from app.chat.schemas import (
     CreateMessageRequest,
@@ -190,9 +191,73 @@ def _reply_text(messages: list[BaseMessage]) -> str | None:
     return None
 
 
+def _turn_state(
+    user_id: int, session_id: uuid.UUID, request: CreateMessageRequest
+) -> AgentState:
+    """Build the state literal one turn starts from.
+
+    Only the user's new turn goes in: the rest of the transcript is replayed
+    by the checkpointer under the same `thread_id`.
+    """
+    return {
+        "session_id": str(session_id),
+        "user_id": user_id,
+        "messages": [HumanMessage(content=request.content or "")],
+    }
+
+
+async def _turn_context(
+    session: AsyncSession, user_id: int, session_id: uuid.UUID
+) -> CueContext | None:
+    """Build the runtime context for one turn, if the session can run one.
+
+    The context is built fresh per invocation and never checkpointed: it
+    carries this request's `AsyncSession`, so a node's writes land in the same
+    unit of work as the request that triggered them. See
+    `app/agent/context.py`.
+
+    Args:
+        session: An active database session.
+        user_id: The Cue user who must own `session_id`.
+        session_id: The session being run.
+
+    Returns:
+        The context, or `None` when the session has no delivery address
+        selected yet - a precondition of running a turn at all, since Swiggy
+        binds a cart to an address.
+
+    Raises:
+        ChatSessionNotFoundError: If `session_id` does not exist or is not
+            owned by `user_id`.
+    """
+    chat_session = await get_session(session, user_id, session_id)
+    if not chat_session.selected_address_id:
+        return None
+    return CueContext(
+        session=session,
+        user_id=user_id,
+        chat_session_id=session_id,
+        address_id=chat_session.selected_address_id,
+    )
+
+
+async def _persist_reply(
+    session: AsyncSession, user_id: int, session_id: uuid.UUID, reply: str
+) -> ChatMessage:
+    """Append one assistant text message to a session's transcript."""
+    return await append_message(
+        session,
+        user_id,
+        session_id,
+        CreateMessageRequest(
+            role=MessageRole.ASSISTANT, kind=MessageKind.TEXT, content=reply
+        ),
+    )
+
+
 async def run_turn(
     session: AsyncSession,
-    graph: CompiledStateGraph[AgentState],
+    graph: CueGraph,
     user_id: int,
     session_id: uuid.UUID,
     request: CreateMessageRequest,
@@ -210,9 +275,14 @@ async def run_turn(
     thread is the LangGraph checkpointer's own state, distinct from this
     display transcript; see the module docstring.
 
-    The whole turn is one blocking request for now. Token streaming
-    (`stream_mode="messages"`) is a separate issue - clients should not be
-    built assuming this endpoint stays synchronous forever.
+    A turn on a session with no delivery address selected is answered here,
+    without invoking the graph: Swiggy binds a cart to an address, so the turn
+    could not finish, and spending a model call on it would be waste. Address
+    selection is a precondition, never something the agent decides.
+
+    The whole turn is one blocking request. `stream_turn` is the streaming
+    equivalent and is what the app uses; this stays for clients that want one
+    payload, and for turns short enough not to need progress.
 
     Args:
         session: An active database session.
@@ -236,12 +306,18 @@ async def run_turn(
     if not _runs_the_agent(request):
         return user_message, None
 
-    state: AgentState = {
-        "session_id": str(session_id),
-        "user_id": user_id,
-        "messages": [HumanMessage(content=request.content or "")],
-    }
-    result = await graph.ainvoke(state, thread_config(str(session_id)))
+    context = await _turn_context(session, user_id, session_id)
+    if context is None:
+        prompt = await _persist_reply(
+            session, user_id, session_id, ADDRESS_REQUIRED_MESSAGE
+        )
+        return user_message, prompt
+
+    result = await graph.ainvoke(
+        _turn_state(user_id, session_id, request),
+        thread_config(str(session_id)),
+        context=context,
+    )
 
     reply = _reply_text(result["messages"])
     if reply is None:
@@ -254,12 +330,5 @@ async def run_turn(
         )
         return user_message, None
 
-    assistant_message = await append_message(
-        session,
-        user_id,
-        session_id,
-        CreateMessageRequest(
-            role=MessageRole.ASSISTANT, kind=MessageKind.TEXT, content=reply
-        ),
-    )
+    assistant_message = await _persist_reply(session, user_id, session_id, reply)
     return user_message, assistant_message

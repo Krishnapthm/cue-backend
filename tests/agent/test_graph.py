@@ -71,10 +71,10 @@ def stub_models(monkeypatch: pytest.MonkeyPatch) -> dict[str, _CountingRunnable]
     guard = _CountingRunnable([])
     recipe = _CountingRunnable([])
     monkeypatch.setattr(
-        guardrail_module, "get_chat_model", lambda: _CountingChatModel(guard)
+        guardrail_module, "get_chat_model", lambda _role: _CountingChatModel(guard)
     )
     monkeypatch.setattr(
-        recipe_module, "get_chat_model", lambda: _CountingChatModel(recipe)
+        recipe_module, "get_chat_model", lambda _role: _CountingChatModel(recipe)
     )
     return {"guardrail": guard, "recipe": recipe}
 

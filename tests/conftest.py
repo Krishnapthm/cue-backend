@@ -21,7 +21,6 @@ os.environ["SWIGGY_CLIENT_ID"] = "test-client-id"
 os.environ["SWIGGY_REDIRECT_URI"] = "https://api.cue.test/providers/swiggy/callback"
 os.environ["SWIGGY_APP_CALLBACK_DEEP_LINK"] = "cue://swiggy-link"
 os.environ["SWIGGY_TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
-os.environ["AGENT_MODEL_NAME"] = "claude-test-model"
 # One allowed browser origin, so the CORS middleware on `app.main.app` has
 # something to allow and something to reject. The *default* being empty is
 # asserted separately, against the settings class rather than this instance.

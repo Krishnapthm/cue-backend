@@ -64,8 +64,10 @@ def _stub(
     runnable = _FakeStructuredRunnable(results)
     monkeypatch.setattr(
         guardrail_node_module,
+        # `get_chat_model` now takes a `ModelRole`; the stub ignores it and
+        # `tests/agent/test_providers.py` asserts the role each node asks for.
         "get_chat_model",
-        lambda: _FakeChatModel(runnable),
+        lambda _role: _FakeChatModel(runnable),
     )
     return runnable
 

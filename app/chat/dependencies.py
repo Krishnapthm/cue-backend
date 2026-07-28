@@ -4,13 +4,11 @@ from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends
-from langgraph.graph.state import CompiledStateGraph
 
-from app.agent.graph import open_compiled_graph
-from app.agent.state import AgentState
+from app.agent.graph import CueGraph, open_compiled_graph
 
 
-async def agent_graph() -> AsyncIterator[CompiledStateGraph[AgentState]]:
+async def agent_graph() -> AsyncIterator[CueGraph]:
     """Yield the compiled agent graph for the duration of one request.
 
     The graph is opened per request, which also opens a checkpointer
@@ -25,4 +23,4 @@ async def agent_graph() -> AsyncIterator[CompiledStateGraph[AgentState]]:
         yield graph
 
 
-AgentGraph = Annotated[CompiledStateGraph[AgentState], Depends(agent_graph)]
+AgentGraph = Annotated[CueGraph, Depends(agent_graph)]

@@ -16,7 +16,7 @@ import httpx
 import pytest
 from langchain_core.exceptions import OutputParserException
 
-from app.agent.config import AgentSettings
+from app.agent.config import AgentSettings, ModelRole
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.nodes import recipe as recipe_node
 from app.agent.schemas import GeneratedRecipe, RecipeIngredient
@@ -94,8 +94,16 @@ def _recipe(dish_name: str = "grandma's lasagna") -> GeneratedRecipe:
 
 def _stub_chat_model(
     monkeypatch: pytest.MonkeyPatch, results: list[GeneratedRecipe | Exception]
-) -> None:
-    monkeypatch.setattr(recipe_node, "get_chat_model", lambda: _FakeChatModel(results))
+) -> list[ModelRole]:
+    """Stub the model seam, returning the roles the node asked it for."""
+    roles: list[ModelRole] = []
+
+    def _get_chat_model(role: ModelRole) -> _FakeChatModel:
+        roles.append(role)
+        return _FakeChatModel(results)
+
+    monkeypatch.setattr(recipe_node, "get_chat_model", _get_chat_model)
+    return roles
 
 
 def _stub_image_store(
@@ -104,6 +112,19 @@ def _stub_image_store(
     fake_store = store or _FakeImageStore()
     monkeypatch.setattr(recipe_node, "get_image_store", lambda: fake_store)
     return fake_store
+
+
+async def test_parse_recipe_photo_node_asks_for_the_vision_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Reading a photo carries the same correctness stakes as generating a
+    # recipe from a dish name, and gets the same class of model - by role.
+    roles = _stub_chat_model(monkeypatch, [_recipe()])
+    _stub_image_store(monkeypatch)
+
+    await recipe_node.parse_recipe_photo_node(_state())
+
+    assert roles == [ModelRole.VISION]
 
 
 async def test_parse_recipe_photo_node_returns_recipe_on_state(

@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import Command
 from pydantic import ValidationError
 
+from app.agent.config import ModelRole
 from app.agent.providers import get_chat_model
 from app.agent.schemas import GuardrailDecision, ScopeVerdict
 from app.agent.state import AgentState
@@ -116,7 +117,9 @@ async def guardrail_node(
         raise ValueError("Cannot classify scope: state has no messages to classify.")
     message = str(messages[-1].content)
 
-    structured_model = get_chat_model().with_structured_output(GuardrailDecision)
+    structured_model = get_chat_model(ModelRole.ROUTER).with_structured_output(
+        GuardrailDecision
+    )
     prompt = _build_prompt(message)
 
     try:

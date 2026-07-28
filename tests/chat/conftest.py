@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 import pytest_asyncio
 from langchain_core.messages import AIMessage
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.context import CueContext
 from app.models.chat import ChatSession
 from app.models.user import User
 
@@ -48,6 +51,15 @@ async def chat_session(db_session: AsyncSession, user: User) -> ChatSession:
 
 
 @dataclass
+class AgentCall:
+    """One recorded invocation of the stub graph."""
+
+    state: dict[str, Any]
+    config: dict[str, Any] | None
+    context: CueContext | None
+
+
+@dataclass
 class FakeAgentGraph:
     """Stands in for the compiled agent graph in `agent_graph`.
 
@@ -58,20 +70,46 @@ class FakeAgentGraph:
 
     reply: str = "Here's what you'll need..."
     raises: Exception | None = None
-    calls: list[tuple[dict[str, Any], dict[str, Any] | None]] = field(
-        default_factory=list
-    )
+    calls: list[AgentCall] = field(default_factory=list)
 
     async def ainvoke(
-        self, state: dict[str, Any], config: dict[str, Any] | None = None
+        self,
+        state: dict[str, Any],
+        config: dict[str, Any] | None = None,
+        *,
+        context: CueContext | None = None,
     ) -> dict[str, Any]:
-        self.calls.append((state, config))
+        self.calls.append(AgentCall(state=state, config=config, context=context))
         if self.raises is not None:
             raise self.raises
         return {
             **state,
             "messages": [*state["messages"], AIMessage(content=self.reply)],
         }
+
+
+#: Signature of the `with_address` fixture: (session_id, address_id=...) -> None.
+SelectAddress = Callable[..., Awaitable[None]]
+
+
+@pytest.fixture
+def with_address(db_session: AsyncSession) -> SelectAddress:
+    """Select a delivery address on a session, as the address picker does.
+
+    A turn on a session with no address is answered without invoking the
+    graph (Swiggy binds a cart to an address), so any test that expects the
+    agent to run has to satisfy that precondition first.
+    """
+
+    async def _select(session_id: str | uuid.UUID, address_id: str = "addr-1") -> None:
+        await db_session.execute(
+            update(ChatSession)
+            .where(ChatSession.id == uuid.UUID(str(session_id)))
+            .values(selected_address_id=address_id)
+        )
+        await db_session.commit()
+
+    return _select
 
 
 @pytest.fixture

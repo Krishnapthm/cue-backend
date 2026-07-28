@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
@@ -8,8 +9,12 @@ from langgraph.graph.message import add_messages
 from app.agent.schemas import (
     GeneratedRecipe,
     GuardrailDecision,
+    MatchResult,
     NormalizedIngredient,
+    TurnFailure,
+    TurnIntent,
 )
+from app.cart.schemas import ComposeCartResult
 
 
 class AgentState(TypedDict):
@@ -51,6 +56,32 @@ class AgentState(TypedDict):
     on why its `reason` never reaches the user. `NotRequired` for the same
     reason as `recipe`: state literals built before the guardrail existed
     stay valid without passing `guardrail=None`.
+
+    `turn_intent` is `route_turn`'s verdict for the current turn: which of the
+    four entry paths it took. `guardrail` keeps the in-scope/out-of-scope
+    framing for logs and traces; this is the branch that was actually run.
+
+    `matches` is the ingredient fan-out's output, one row per ingredient. It
+    **must** carry the `operator.add` reducer: the rows are written by
+    parallel `Send` workers, and without a reducer the last worker to finish
+    silently overwrites every other worker's result - a failure that produces
+    a plausible-looking one-item checklist rather than an error. It is
+    `NotRequired` *inside* the `Annotated` so the reducer stays the outermost,
+    visible thing while state literals written before it existed stay valid;
+    the reducer supplies `[]` at runtime either way.
+
+    `cart_plan_id` and `compose_result` are the cart composition's outcome:
+    the `cart_plan` row it recorded, and the subtotal/minimum-order verdict
+    the report is rendered from.
+
+    `failure` records a turn that ended without its intended output in a form
+    the client can render and act on (reconnect Swiggy, retry). Failures that
+    are *our* bugs still raise and surface as 5xx; this field is for the ones
+    the user is expected to resolve.
+
+    Nothing here may be non-JSON-serializable: this TypedDict is checkpointed
+    to Postgres in full. Request-scoped handles - the `AsyncSession` above all
+    - travel on `CueContext` instead (see `app/agent/context.py`).
     """
 
     session_id: str
@@ -61,3 +92,8 @@ class AgentState(TypedDict):
     image_object_path: NotRequired[str | None]
     have_marks: NotRequired[set[str]]
     normalized_ingredients: NotRequired[list[NormalizedIngredient]]
+    turn_intent: NotRequired[TurnIntent]
+    matches: Annotated[NotRequired[list[MatchResult]], operator.add]
+    cart_plan_id: NotRequired[int | None]
+    compose_result: NotRequired[ComposeCartResult | None]
+    failure: NotRequired[TurnFailure | None]

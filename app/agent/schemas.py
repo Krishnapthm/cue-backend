@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.cart.schemas import MatchStatus
 
 
 class RecipeIngredient(BaseModel):
@@ -50,6 +53,78 @@ class GuardrailDecision(BaseModel):
 
     verdict: ScopeVerdict
     reason: str
+
+
+class TurnIntent(StrEnum):
+    """What the user's turn is asking the graph to do (CUE-86).
+
+    A closed enum for the same reason `ScopeVerdict` is one: an entry
+    classifier that returns an unrecognized label must fail validation and be
+    handled as malformed, never coerced into a path that spends a model call
+    or touches the user's cart.
+    """
+
+    OUT_OF_SCOPE = "out_of_scope"
+    RECIPE = "recipe"
+    PHOTO = "photo"
+    ORDER_STATUS = "order_status"
+
+
+class MatchResult(BaseModel):
+    """One ingredient resolved against Instamart, as the graph carries it.
+
+    Written by the parallel `Send` workers of the ingredient fan-out, so
+    `AgentState.matches` reduces with `operator.add` - see the state docstring.
+    Everything here is JSON-serializable because it is checkpointed.
+
+    `status` reuses `cart.schemas.MatchStatus` rather than redeclaring the
+    three values: that enum mirrors `cart_plan_item.match_status`'s CHECK
+    constraint, and a second copy would be free to drift away from the column
+    these rows are ultimately persisted into.
+
+    `substitution_reason` is why a swap was made ("Amul 500g out of stock;
+    nearest pack is Nandini 450g"), so the checklist can say *why* something
+    changed rather than silently showing a different product. It is
+    deterministic, service-generated text - unlike `GuardrailDecision.reason`
+    it is safe to render. It is `None` on a plain `MATCHED` row.
+    """
+
+    ingredient_name: str
+    status: MatchStatus
+    spin_id: str | None = None
+    product_name: str | None = None
+    pack_size: str | None = None
+    unit_price: Decimal | None = None
+    quantity: int | None = None
+    substitution_reason: str | None = Field(default=None, max_length=1000)
+
+
+class TurnFailureKind(StrEnum):
+    """Why a turn could not be completed, at the granularity the UI acts on."""
+
+    # The Swiggy link expired or was revoked: the only recovery is a fresh
+    # OAuth authorize (see `app.instamart.exceptions.InstamartAuthError`).
+    PROVIDER_AUTH = "provider_auth"
+    # Swiggy was unreachable or errored; retrying the turn is reasonable.
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    # Swiggy executed the request and said no (out of stock, store closed).
+    PROVIDER_REJECTED = "provider_rejected"
+    # Anything else. The client offers a retry and nothing more specific.
+    INTERNAL = "internal"
+
+
+class TurnFailure(BaseModel):
+    """A turn that ended without its intended output, in renderable form.
+
+    Recorded in state (rather than raised out of the graph) for failures the
+    user is expected to *act* on - reconnecting Swiggy, above all - because a
+    turn that streamed half a checklist before failing has already sent its
+    HTTP status code. `message` is written by us, never by a model and never
+    from a raw upstream error, so it is safe to render.
+    """
+
+    kind: TurnFailureKind
+    message: str
 
 
 class IngredientStatus(StrEnum):

@@ -15,6 +15,7 @@ from langchain_core.messages import (
 )
 from pydantic import ValidationError
 
+from app.agent.config import ModelRole
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.providers import get_chat_model
 from app.agent.schemas import GeneratedRecipe, RecipeIngredient
@@ -128,7 +129,9 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
         )
     dish_name = str(messages[-1].content)
 
-    structured_model = get_chat_model().with_structured_output(GeneratedRecipe)
+    structured_model = get_chat_model(ModelRole.RECIPE).with_structured_output(
+        GeneratedRecipe
+    )
     prompt = [SystemMessage(content=_SYSTEM_PROMPT), HumanMessage(content=dish_name)]
 
     try:
@@ -267,7 +270,9 @@ async def parse_recipe_photo_node(state: AgentState) -> dict[str, Any]:
     image_base64 = base64.b64encode(image_bytes).decode("ascii")
     mime_type = _infer_image_mime_type(object_path)
 
-    structured_model = get_chat_model().with_structured_output(GeneratedRecipe)
+    structured_model = get_chat_model(ModelRole.VISION).with_structured_output(
+        GeneratedRecipe
+    )
     # `HumanMessage.content` is typed as `list[str | dict[str, Any]]`; the
     # standard content-block TypedDicts are structurally dicts at runtime, so
     # the cast below only satisfies mypy - it does not change the payload.

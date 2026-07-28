@@ -10,12 +10,13 @@ from httpx import ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.exceptions import RecipeGenerationError
+from app.chat.constants import ADDRESS_REQUIRED_MESSAGE
 from app.chat.dependencies import agent_graph
 from app.database import get_session
 from app.main import app
 from app.models.chat import ChatSession
 from app.models.user import User
-from tests.chat.conftest import FakeAgentGraph
+from tests.chat.conftest import FakeAgentGraph, SelectAddress
 
 
 @pytest_asyncio.fixture
@@ -138,10 +139,13 @@ async def test_get_returns_404_for_another_users_session(
 
 
 async def test_get_returns_the_session_with_its_ordered_transcript(
-    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
 ) -> None:
     create_response = await authed_client.post("/chat/sessions")
     session_id = create_response.json()["id"]
+    await with_address(session_id)
     await authed_client.post(
         f"/chat/sessions/{session_id}/messages",
         json={"role": "user", "content": "one"},
@@ -157,7 +161,7 @@ async def test_get_returns_the_session_with_its_ordered_transcript(
     body = response.json()
     assert body["id"] == session_id
     assert body["title"] is None
-    assert body["selected_address_id"] is None
+    assert body["selected_address_id"] == "addr-1"
     # The user turn now also persists the agent's reply between the two.
     assert [m["content"] for m in body["messages"]] == [
         "one",
@@ -306,9 +310,12 @@ async def test_add_message_resurfaces_session_at_the_top_of_recents(
 
 
 async def test_a_user_text_turn_returns_both_messages(
-    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
 ) -> None:
     session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
 
     response = await authed_client.post(
         f"/chat/sessions/{session_id}/messages",
@@ -325,9 +332,12 @@ async def test_a_user_text_turn_returns_both_messages(
 
 
 async def test_the_turn_lands_in_the_transcript_in_order(
-    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
 ) -> None:
     session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
     await authed_client.post(
         f"/chat/sessions/{session_id}/messages",
         json={"role": "user", "content": "paneer butter masala"},
@@ -342,19 +352,22 @@ async def test_the_turn_lands_in_the_transcript_in_order(
 
 
 async def test_the_agent_runs_on_the_sessions_own_thread(
-    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
 ) -> None:
     # Two sessions for the same user must keep separate agent memory.
     first = (await authed_client.post("/chat/sessions")).json()["id"]
     second = (await authed_client.post("/chat/sessions")).json()["id"]
 
     for session_id in (first, second):
+        await with_address(session_id)
         await authed_client.post(
             f"/chat/sessions/{session_id}/messages",
             json={"role": "user", "content": "hi"},
         )
 
-    configs = [config for _, config in fake_agent.calls]
+    configs = [call.config for call in fake_agent.calls]
     assert all(config is not None for config in configs)
     thread_ids = [config["configurable"]["thread_id"] for config in configs if config]
     assert thread_ids == [first, second]
@@ -362,10 +375,13 @@ async def test_the_agent_runs_on_the_sessions_own_thread(
 
 
 async def test_an_off_topic_turn_persists_the_refusal(
-    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
 ) -> None:
     fake_agent.reply = "I can only help with cooking."
     session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
 
     response = await authed_client.post(
         f"/chat/sessions/{session_id}/messages",
@@ -442,10 +458,13 @@ async def test_another_users_session_404s_before_any_agent_work(
 
 
 async def test_an_agent_failure_is_502_and_keeps_the_user_message(
-    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
 ) -> None:
     fake_agent.raises = RecipeGenerationError()
     session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
 
     response = await authed_client.post(
         f"/chat/sessions/{session_id}/messages",
@@ -459,3 +478,64 @@ async def test_an_agent_failure_is_502_and_keeps_the_user_message(
     assert [(m["role"], m["content"]) for m in transcript["messages"]] == [
         ("user", "paneer butter masala")
     ]
+
+
+# --- CUE-85: the address precondition and the runtime context ----------------
+
+
+async def test_a_turn_without_a_selected_address_never_reaches_the_agent(
+    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+) -> None:
+    # Swiggy binds a cart to an address, so the turn could not finish. It is
+    # answered with the picker prompt rather than spending a model call.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["assistant_message"]["content"] == ADDRESS_REQUIRED_MESSAGE
+    assert fake_agent.calls == []
+
+
+async def test_the_address_prompt_persists_like_any_other_reply(
+    authed_client: httpx.AsyncClient,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [(m["role"], m["content"]) for m in transcript["messages"]] == [
+        ("user", "paneer butter masala"),
+        ("assistant", ADDRESS_REQUIRED_MESSAGE),
+    ]
+
+
+async def test_the_turn_carries_the_runtime_context_not_a_state_session(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+    user: User,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id, "addr-42")
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    call = fake_agent.calls[0]
+    assert call.context is not None
+    assert call.context.address_id == "addr-42"
+    assert call.context.user_id == user.id
+    assert str(call.context.chat_session_id) == session_id
+    assert call.context.session is not None
+    # The session travels on the context, never in the checkpointed state.
+    assert "session" not in call.state

@@ -9,6 +9,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.agent.context import CueContext
 from app.agent.nodes.guardrail import guardrail_node, refuse_node
 from app.agent.nodes.recipe import generate_recipe_node
 from app.agent.state import AgentState
@@ -16,12 +17,17 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+#: The compiled graph as every caller outside this module sees it: state and
+#: runtime context both pinned, so a caller that forgets `context=` on an
+#: invocation is a type error rather than an `AttributeError` inside a node.
+CueGraph = CompiledStateGraph[AgentState, CueContext]
+
 GUARDRAIL = "guardrail"
 GENERATE_RECIPE = "generate_recipe"
 REFUSE = "refuse"
 
 
-def build_graph() -> StateGraph[AgentState]:
+def build_graph() -> StateGraph[AgentState, CueContext]:
     """Build the agent's (uncompiled) chat loop.
 
     ```
@@ -39,6 +45,11 @@ def build_graph() -> StateGraph[AgentState]:
     alongside it would run both branches. `parse_recipe_photo_node` and
     `normalize_ingredients_node` stay unwired - text input only, for now.
 
+    The graph is typed against `CueContext`, which carries the request-scoped
+    handles nodes need but must never checkpoint - the database session above
+    all. A fresh instance is supplied per `ainvoke`/`astream` by
+    `chat.service.run_turn`; see `app/agent/context.py`.
+
     LangSmith tracing is not configured here: LangGraph/LangChain trace
     automatically once `LANGSMITH_TRACING`/`LANGSMITH_API_KEY`/`LANGSMITH_PROJECT`
     are real process env vars (see `main.py`'s `load_dotenv()` call) - no
@@ -48,7 +59,9 @@ def build_graph() -> StateGraph[AgentState]:
         The uncompiled `StateGraph`; the caller compiles it (optionally with a
         checkpointer via `open_compiled_graph`).
     """
-    builder: StateGraph[AgentState] = StateGraph(AgentState)
+    builder: StateGraph[AgentState, CueContext] = StateGraph(
+        AgentState, context_schema=CueContext
+    )
     builder.add_node(GUARDRAIL, guardrail_node)
     builder.add_node(GENERATE_RECIPE, generate_recipe_node)
     builder.add_node(REFUSE, refuse_node)
@@ -96,7 +109,7 @@ def _checkpointer_conn_string() -> str:
 @asynccontextmanager
 async def open_compiled_graph(
     conn_string: str | None = None,
-) -> AsyncIterator[CompiledStateGraph[AgentState]]:
+) -> AsyncIterator[CueGraph]:
     """Yield the compiled graph wired to a Postgres checkpointer.
 
     The checkpointer persists state against the same database as the app,
