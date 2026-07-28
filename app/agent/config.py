@@ -25,6 +25,9 @@ class ModelRole(StrEnum):
       is at the stove, so this role buys the strongest model in the system.
     * `VISION` - reads a recipe photo into the same schema `RECIPE` produces,
       with the same correctness stakes.
+    * `ORDER_STATUS` - turns an already-fetched tracking payload into one
+      sentence. There is no reasoning to do, the output is short, and the user
+      is waiting, so the cheapest fast model wins outright.
 
     Deterministic nodes (`normalize_ingredients`, `select_variant`,
     `propose_substitute`, `report_cart`, `refuse`) take no model at all and
@@ -34,6 +37,7 @@ class ModelRole(StrEnum):
     ROUTER = "router"
     RECIPE = "recipe"
     VISION = "vision"
+    ORDER_STATUS = "order_status"
 
 
 class ReasoningEffort(StrEnum):
@@ -103,9 +107,16 @@ class AgentSettings(BaseSettings):
     # grocery vocabulary, brand names, and pack conventions.
     MODEL_RECIPE: str = "gpt-5.6-luna"
     MODEL_VISION: str = "gpt-5.6-luna"
+    # Order status: nano, for the same cached-input reason as the router. This
+    # node rewrites a structured payload the service layer already validated
+    # into one sentence - the model is doing wording, not judgement.
+    MODEL_ORDER_STATUS: str = "gpt-5.4-nano-2026-03-17"
     # The router emits a four-way label from an explicit rubric; reasoning
     # tokens buy nothing there and are billed at output rates.
     MODEL_ROUTER_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
+    # Same reasoning, and the stronger one: the user is waiting on this reply,
+    # so latency spent thinking about a one-sentence status is latency wasted.
+    MODEL_ORDER_STATUS_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
 
     # Supabase project base URL, used to build recipe-photo object URLs (see
     # `app.agent.storage.SupabaseImageStore`). Optional so the app still
@@ -136,6 +147,11 @@ class AgentSettings(BaseSettings):
                 return ModelChoice(model_id=self.MODEL_RECIPE)
             case ModelRole.VISION:
                 return ModelChoice(model_id=self.MODEL_VISION)
+            case ModelRole.ORDER_STATUS:
+                return ModelChoice(
+                    model_id=self.MODEL_ORDER_STATUS,
+                    reasoning_effort=self.MODEL_ORDER_STATUS_REASONING_EFFORT,
+                )
 
 
 @lru_cache

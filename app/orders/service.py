@@ -45,6 +45,14 @@ _OUT_FOR_DELIVERY_STATUS_TOKENS = frozenset(
 # require a shared store (e.g. Redis) keyed the same way.
 _tracking_cache: dict[tuple[int, str], tuple[float, TrackingResponse]] = {}
 
+# The same discipline for the order *list*, keyed by user. `list_orders` is a
+# live Swiggy call too, and CUE-88's chat turn ("where is my order") is a poll
+# the user can trigger just by typing - three questions in a row would be three
+# upstream calls without this. Shares `MIN_POLL_INTERVAL_SECONDS` and `_now()`
+# with the tracking cache above deliberately: the floor is defined once, in the
+# one module that owns poll discipline, rather than reimplemented per caller.
+_orders_cache: dict[int, tuple[float, list[OrderListItem]]] = {}
+
 
 def _now() -> float:
     """Monotonic clock, indirected so tests can monkeypatch it to advance
@@ -53,8 +61,9 @@ def _now() -> float:
 
 
 def _reset_tracking_cache() -> None:
-    """Clear the tracking cache. Exposed for test isolation between cases."""
+    """Clear both poll caches. Exposed for test isolation between cases."""
     _tracking_cache.clear()
+    _orders_cache.clear()
 
 
 def _map_status(raw: str) -> TrackingStatus:
@@ -140,6 +149,44 @@ async def list_orders(session: AsyncSession, user_id: int) -> list[OrderListItem
         )
         for summary in summaries
     ]
+
+
+async def list_orders_throttled(
+    session: AsyncSession, user_id: int
+) -> list[OrderListItem]:
+    """`list_orders` behind the same >=10s floor `get_tracking` enforces.
+
+    The REST Orders list is opened by a deliberate navigation, so it reads
+    live. A chat "where is my order" turn is different: the user can ask three
+    times in a row, and each question would otherwise be another live Swiggy
+    call. The floor makes the chat path incapable of being that bypass, and it
+    is the *existing* floor rather than a second one - same constant, same
+    clock, same module.
+
+    Failures are never cached, so a transient error is retried live on the next
+    turn rather than being served back for ten seconds.
+
+    Args:
+        session: An active database session.
+        user_id: The owning Cue user.
+
+    Returns:
+        The user's recent orders, newest first - live, or the result of the
+        last live call if one happened within the floor.
+
+    Raises:
+        InstamartAuthError: Not linked, or the link is expired (propagates
+            uncaught; the global `AppError` handler maps it to 401).
+    """
+    cached = _orders_cache.get(user_id)
+    if cached is not None:
+        last_live_call, cached_orders = cached
+        if _now() - last_live_call < MIN_POLL_INTERVAL_SECONDS:
+            return cached_orders
+
+    orders = await list_orders(session, user_id)
+    _orders_cache[user_id] = (_now(), orders)
+    return orders
 
 
 async def get_order(

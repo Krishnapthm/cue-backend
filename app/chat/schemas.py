@@ -28,6 +28,21 @@ class MessageRole(StrEnum):
     ASSISTANT = "assistant"
 
 
+class ImageMessagePayload(BaseModel):
+    """The `payload` of a `kind='image'` message (CUE-88).
+
+    One shape, because there is one upload path. The design offers two attach
+    tiles - camera and photo library - but both produce the same uploaded
+    Supabase Storage object, so the backend has one contract, not two.
+
+    `object_path` is the storage object path the client uploaded to, e.g.
+    `recipes/u1/8f2c.jpg`. It is what reaches `AgentState.image_object_path`
+    and, through it, `parse_recipe_photo_node`'s image fetch.
+    """
+
+    object_path: str = Field(min_length=1)
+
+
 class CreateMessageRequest(BaseModel):
     """A message to append to a chat session's transcript."""
 
@@ -43,12 +58,30 @@ class CreateMessageRequest(BaseModel):
         `kind="text"` requires `content`; every other kind requires `payload`.
         Enforced here so a violation returns 422 before it ever reaches the
         database constraint.
+
+        A `kind="image"` payload is validated further, against
+        `ImageMessagePayload`: that turn runs the vision path, and an
+        unusable payload should be a 422 at the boundary rather than a node
+        raising several seconds into a turn the user is watching.
         """
         if self.kind is MessageKind.TEXT and self.content is None:
             raise ValueError("content is required when kind is 'text'.")
         if self.kind is not MessageKind.TEXT and self.payload is None:
             raise ValueError("payload is required when kind is not 'text'.")
+        if self.kind is MessageKind.IMAGE and self.payload is not None:
+            ImageMessagePayload.model_validate(self.payload)
         return self
+
+    def image_object_path(self) -> str | None:
+        """Return the uploaded object path, if this is an image message.
+
+        The extraction the graph's boundary needs, kept on the request model so
+        the payload is parsed through `ImageMessagePayload` in one place rather
+        than indexed as a raw dict by every caller.
+        """
+        if self.kind is not MessageKind.IMAGE or self.payload is None:
+            return None
+        return ImageMessagePayload.model_validate(self.payload).object_path
 
 
 class MessageResponse(BaseModel):

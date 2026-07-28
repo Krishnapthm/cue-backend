@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 import httpx
 import pytest_asyncio
 from httpx import ASGITransport
+from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.exceptions import RecipeGenerationError
@@ -16,7 +17,7 @@ from app.database import get_session
 from app.main import app
 from app.models.chat import ChatSession
 from app.models.user import User
-from tests.chat.conftest import FakeAgentGraph, SelectAddress
+from tests.chat.conftest import FakeAgentGraph, FakeInterrupt, SelectAddress
 
 
 @pytest_asyncio.fixture
@@ -417,9 +418,12 @@ async def test_an_assistant_role_turn_runs_no_agent(
     assert fake_agent.calls == []
 
 
-async def test_a_checklist_turn_runs_no_agent(
+async def test_an_unreadable_checklist_answer_is_422(
     authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
 ) -> None:
+    # A user `checklist` message is the resume value of the checklist interrupt
+    # (CUE-90). A resume we cannot read is not consent: defaulting it to "none
+    # of them" would silently buy everything the user already owns.
     session_id = (await authed_client.post("/chat/sessions")).json()["id"]
 
     response = await authed_client.post(
@@ -429,6 +433,41 @@ async def test_a_checklist_turn_runs_no_agent(
             "kind": "checklist",
             "payload": {"items": ["rice", "eggs"]},
         },
+    )
+
+    assert response.status_code == 422
+    assert fake_agent.calls == []
+
+
+async def test_a_checklist_answer_with_nothing_paused_is_409(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # `Command(resume=...)` on a thread with no pending interrupt does not
+    # error - it starts a fresh run and the session looks stuck. Failing loudly
+    # here is what makes that impossible.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.interrupts = ()
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "kind": "checklist", "payload": {"have": ["salt"]}},
+    )
+
+    assert response.status_code == 409
+    assert fake_agent.calls == []
+
+
+async def test_a_cart_ready_turn_runs_no_agent(
+    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "kind": "cart_ready", "payload": {"plan_id": 1}},
     )
 
     assert response.status_code == 201
@@ -538,4 +577,156 @@ async def test_the_turn_carries_the_runtime_context_not_a_state_session(
     assert str(call.context.chat_session_id) == session_id
     assert call.context.session is not None
     # The session travels on the context, never in the checkpointed state.
-    assert "session" not in call.state
+    assert "session" not in call.turn_state
+
+
+# --- the image intake path (CUE-88) ------------------------------------------
+
+
+async def test_an_image_turn_reaches_the_agent_with_its_object_path(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # This is the `ChatMessage.payload` -> `AgentState` extraction CUE-23
+    # deferred. `route_turn` branches on `image_object_path` alone, so it has to
+    # arrive set or the photo path is unreachable.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={
+            "role": "user",
+            "kind": "image",
+            "payload": {"object_path": "recipes/u1/8f2c.jpg"},
+        },
+    )
+
+    assert response.status_code == 201
+    assert fake_agent.calls[0].turn_state["image_object_path"] == "recipes/u1/8f2c.jpg"
+
+
+async def test_a_text_turn_carries_no_image_path(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The field survives in the checkpoint, so a text turn must actively clear
+    # it - otherwise the turn after a photo would re-read the stale photo.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    assert fake_agent.calls[0].turn_state["image_object_path"] is None
+
+
+async def test_an_image_turn_with_no_object_path_is_422(
+    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+) -> None:
+    # An unusable payload should fail at the boundary, not several seconds into
+    # a turn the user is watching.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "kind": "image", "payload": {"url": "https://x/y.jpg"}},
+    )
+
+    assert response.status_code == 422
+    assert fake_agent.calls == []
+
+
+async def test_an_image_turn_with_a_blank_object_path_is_422(
+    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "kind": "image", "payload": {"object_path": ""}},
+    )
+
+    assert response.status_code == 422
+    assert fake_agent.calls == []
+
+
+# --- the checklist pause and its resume (CUE-90) ------------------------------
+
+
+async def test_a_paused_turn_persists_the_checklist_and_no_reply(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The turn owes the user a decision, not an answer. The checklist is
+    # persisted so the transcript still renders it after a reconnect.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    payload = {"ui": "checklist", "items": [{"name": "salt", "have": True}]}
+    fake_agent.interrupt_value = payload
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    assert response.status_code == 201
+    assistant = response.json()["assistant_message"]
+    assert assistant["kind"] == "checklist"
+    assert assistant["payload"] == payload
+
+
+async def test_a_checklist_answer_resumes_the_same_thread(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.interrupts = (FakeInterrupt(id="int-1", value={"ui": "checklist"}),)
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={
+            "role": "user",
+            "kind": "checklist",
+            "payload": {"have": ["salt", "pepper"]},
+        },
+    )
+
+    assert response.status_code == 201
+    call = fake_agent.calls[0]
+    # A `Command(resume=...)`, never a plain state dict: a dict would not error,
+    # it would start a fresh run and the session would look stuck.
+    assert isinstance(call.state, Command)
+    assert call.state.resume == {"have": ["salt", "pepper"]}
+    # Pause and resume must share a thread_id or the answer joins a new
+    # conversation.
+    assert call.config == {"configurable": {"thread_id": session_id}}
+
+
+async def test_a_resumed_turn_persists_no_duplicate_reply(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # Everything in a resumed run's `messages` is replayed history, so taking
+    # the "last" reply from it would repost the recipe bubble from the turn
+    # that paused.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.interrupts = (FakeInterrupt(id="int-1", value={"ui": "checklist"}),)
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "kind": "checklist", "payload": {"have": ["salt"]}},
+    )
+
+    assert response.json()["assistant_message"] is None
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == ["checklist"]

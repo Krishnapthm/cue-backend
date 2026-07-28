@@ -8,9 +8,12 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import RetryPolicy
 
 from app.agent.context import CueContext
+from app.agent.nodes.confirm_checklist import confirm_checklist
 from app.agent.nodes.guardrail import refuse_node
+from app.agent.nodes.normalize import normalize_ingredients_node
 from app.agent.nodes.order_status import order_status_node
 from app.agent.nodes.recipe import generate_recipe_node, parse_recipe_photo_node
 from app.agent.nodes.route import route_turn
@@ -28,6 +31,8 @@ ROUTE_TURN = "route_turn"
 GENERATE_RECIPE = "generate_recipe"
 PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
+NORMALIZE_INGREDIENTS = "normalize_ingredients"
+CONFIRM_CHECKLIST = "confirm_checklist"
 REFUSE = "refuse"
 
 #: Nodes whose model output is prose meant for the user, and whose tokens may
@@ -42,15 +47,31 @@ REFUSE = "refuse"
 #: safe to stream.
 PROSE_NODES: frozenset[str] = frozenset({ORDER_STATUS})
 
+#: Retry policy for the nodes that reach off-box - the recipe photo fetch and
+#: parse, and the order-status lookup. A transient upstream failure is the
+#: system's problem to retry, not the user's problem to read about; anything
+#: that survives three attempts is a real failure and surfaces as one.
+#:
+#: Note this is retries of the *whole node*. Both nodes are safe to re-run:
+#: neither writes anything, and `list_orders_throttled`'s floor means a retried
+#: order-status node is served the cached list rather than re-hitting Swiggy.
+NETWORK_RETRY = RetryPolicy(max_attempts=3)
+
 
 def build_graph() -> StateGraph[AgentState, CueContext]:
     """Build the agent's (uncompiled) chat loop.
 
     ```
-    START -> route_turn --(recipe)-------> generate_recipe ---> END
-                 |
-                 +-------(photo)--------> parse_recipe_photo -> END
-                 |
+    START -> route_turn --(recipe)--------------> generate_recipe
+                 |                                      ^    |
+                 +-------(photo)--> parse_recipe_photo --+    v
+                 |                                    normalize_ingredients
+                 |                                            |
+                 |                                            v
+                 |                                    confirm_checklist  (pauses)
+                 |                                            |
+                 |                                            v
+                 |                                           END
                  +-------(order_status)-> order_status ------> END
                  |
                  +-------(out_of_scope)-> refuse ------------> END
@@ -58,16 +79,29 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
 
     Every turn enters through the router, which both labels the turn and
     picks its branch, so off-topic turns are turned away before any recipe
-    model call. `normalize_ingredients_node` stays unwired.
+    model call.
+
+    The two intake paths converge: a photo turn joins the text path at
+    `generate_recipe` and gets a checklist and a cart like any other. On that
+    turn `generate_recipe` renders the already-parsed recipe rather than
+    generating a second one - see `_render_parsed_photo`.
+
+    `generate_recipe -> normalize_ingredients -> confirm_checklist` are static
+    edges: there is no routing decision to make, every recipe turn produces a
+    checklist and every checklist is confirmed.
+
+    `confirm_checklist` is the graph's **only** interrupt, so a compiled graph
+    without a checkpointer can run every branch except that pause. Checkout left
+    the graph entirely (CUE-80), which is why there is no second one - and why
+    no non-idempotent mutation sits behind a pause at all.
+
+    `parse_recipe_photo` and `order_status` both reach off-box and carry
+    `NETWORK_RETRY`; see the note there.
 
     There is deliberately **no** static edge out of `route_turn`: it routes
     with a `Command`, which adds a *dynamic* edge, and a static edge
     alongside it would run both branches. The destinations are declared
     through the node's `Command[...]` return annotation instead.
-
-    `order_status` is a deterministic stand-in until CUE-88 implements it; it
-    is wired now because a `Command` destination that does not exist fails at
-    compile time, so the route and its node must land together.
 
     The graph is typed against `CueContext`, which carries the request-scoped
     handles nodes need but must never checkpoint - the database session above
@@ -88,12 +122,18 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     )
     builder.add_node(ROUTE_TURN, route_turn)
     builder.add_node(GENERATE_RECIPE, generate_recipe_node)
-    builder.add_node(PARSE_RECIPE_PHOTO, parse_recipe_photo_node)
-    builder.add_node(ORDER_STATUS, order_status_node)
+    builder.add_node(
+        PARSE_RECIPE_PHOTO, parse_recipe_photo_node, retry_policy=NETWORK_RETRY
+    )
+    builder.add_node(ORDER_STATUS, order_status_node, retry_policy=NETWORK_RETRY)
+    builder.add_node(NORMALIZE_INGREDIENTS, normalize_ingredients_node)
+    builder.add_node(CONFIRM_CHECKLIST, confirm_checklist)
     builder.add_node(REFUSE, refuse_node)
     builder.add_edge(START, ROUTE_TURN)
-    builder.add_edge(GENERATE_RECIPE, END)
-    builder.add_edge(PARSE_RECIPE_PHOTO, END)
+    builder.add_edge(PARSE_RECIPE_PHOTO, GENERATE_RECIPE)
+    builder.add_edge(GENERATE_RECIPE, NORMALIZE_INGREDIENTS)
+    builder.add_edge(NORMALIZE_INGREDIENTS, CONFIRM_CHECKLIST)
+    builder.add_edge(CONFIRM_CHECKLIST, END)
     builder.add_edge(ORDER_STATUS, END)
     builder.add_edge(REFUSE, END)
     return builder

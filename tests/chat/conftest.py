@@ -4,11 +4,12 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
 from langchain_core.messages import AIMessage
+from langgraph.types import Command
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,9 +56,27 @@ async def chat_session(db_session: AsyncSession, user: User) -> ChatSession:
 class AgentCall:
     """One recorded invocation of the stub graph."""
 
-    state: dict[str, Any]
+    state: dict[str, Any] | Command[Any]
     config: dict[str, Any] | None
     context: CueContext | None
+
+    @property
+    def turn_state(self) -> dict[str, Any]:
+        """The state literal this call started from.
+
+        A resume is a `Command`, not a state dict, so a test that reads fields
+        off the turn asserts here that it is looking at a fresh turn.
+        """
+        assert isinstance(self.state, dict), "this call was a resume, not a turn"
+        return self.state
+
+
+@dataclass(frozen=True)
+class FakeInterrupt:
+    """Stands in for a LangGraph `Interrupt`: an id and an opaque payload."""
+
+    id: str
+    value: Any
 
 
 @dataclass
@@ -78,10 +97,13 @@ class FakeAgentGraph:
     chunks: list[tuple[str, Any]] | None = None
     #: What `aget_state` reports as pending, as raw interrupt objects.
     interrupts: tuple[Any, ...] = ()
+    #: When set, `ainvoke` reports a pause carrying this payload instead of
+    #: running the turn to a reply.
+    interrupt_value: dict[str, Any] | None = None
 
     async def ainvoke(
         self,
-        state: dict[str, Any],
+        state: dict[str, Any] | Command[Any],
         config: dict[str, Any] | None = None,
         *,
         context: CueContext | None = None,
@@ -89,6 +111,17 @@ class FakeAgentGraph:
         self.calls.append(AgentCall(state=state, config=config, context=context))
         if self.raises is not None:
             raise self.raises
+        if self.interrupt_value is not None:
+            return {
+                "messages": [],
+                "__interrupt__": [
+                    FakeInterrupt(id="int-1", value=self.interrupt_value)
+                ],
+            }
+        if isinstance(state, Command):
+            # A resume carries no state of its own; the checkpointer has it.
+            resume = cast("dict[str, Any]", state.resume)
+            return {"messages": [], "have_marks": set(resume["have"])}
         return {
             **state,
             "messages": [*state["messages"], AIMessage(content=self.reply)],
@@ -119,14 +152,6 @@ class FakeAgentGraph:
 
     async def aget_state(self, config: dict[str, Any]) -> Any:
         return SimpleNamespace(interrupts=self.interrupts)
-
-
-@dataclass(frozen=True)
-class FakeInterrupt:
-    """Stands in for a LangGraph `Interrupt`: an id and an opaque payload."""
-
-    id: str
-    value: Any
 
 
 #: Signature of the `with_address` fixture: (session_id, address_id=...) -> None.

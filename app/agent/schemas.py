@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -164,3 +165,51 @@ class NormalizedIngredient(BaseModel):
     quantity: float | None = None
     unit: str | None = None
     status: IngredientStatus
+
+
+class ChecklistItem(BaseModel):
+    """One row of the checklist the `confirm_checklist` interrupt renders.
+
+    A projection of `NormalizedIngredient` rather than the model itself: this
+    crosses to the client, so it carries `have` as the boolean a checkbox binds
+    to instead of the internal `IngredientStatus` enum. `have` arrives already
+    ticked for anything the pantry seeded (CUE-89).
+    """
+
+    name: str
+    quantity: float | None = None
+    unit: str | None = None
+    have: bool
+
+    @classmethod
+    def from_normalized(cls, row: NormalizedIngredient) -> ChecklistItem:
+        """Project one normalized row onto its checklist row."""
+        return cls(
+            name=row.name,
+            quantity=row.quantity,
+            unit=row.unit,
+            have=row.status is IngredientStatus.HAVE,
+        )
+
+
+class ChecklistInterrupt(BaseModel):
+    """The payload `confirm_checklist` interrupts with (CUE-90).
+
+    `ui` is a discriminator, not decoration: the design renders this interrupt
+    inline in the chat transcript and a future interrupt may not, so the client
+    routes on an explicit field rather than inferring from the payload's shape.
+    """
+
+    ui: Literal["checklist"] = "checklist"
+    items: list[ChecklistItem]
+
+
+class ChecklistDecision(BaseModel):
+    """The user's answer to the checklist, i.e. the interrupt's resume value.
+
+    `have` is the ingredient names they confirmed owning; everything else on the
+    checklist is bought. Validated rather than read as a raw dict because it is
+    the consent that authorizes mutating the user's Swiggy cart.
+    """
+
+    have: list[str]

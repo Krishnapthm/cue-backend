@@ -26,6 +26,15 @@ os.environ["SWIGGY_TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 # asserted separately, against the settings class rather than this instance.
 os.environ["CORS_ALLOW_ORIGINS"] = '["http://localhost:8081"]'
 
+# No test may reach a real model. Every model-backed node is exercised through
+# a stubbed `get_chat_model`, and these keys are removed so a *missed* stub
+# fails loudly at construction instead of billing a live request on whichever
+# machine happens to have a key exported. `tests/agent/test_providers.py`
+# monkeypatches dummy keys back in for the one place that must construct a real
+# client - it never invokes one.
+os.environ.pop("OPENAI_API_KEY", None)
+os.environ.pop("ANTHROPIC_API_KEY", None)
+
 import subprocess
 import uuid
 from collections.abc import AsyncGenerator, Generator

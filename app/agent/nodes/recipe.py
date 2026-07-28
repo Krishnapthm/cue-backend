@@ -18,7 +18,7 @@ from pydantic import ValidationError
 from app.agent.config import ModelRole
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.providers import get_chat_model
-from app.agent.schemas import GeneratedRecipe, RecipeIngredient
+from app.agent.schemas import GeneratedRecipe, RecipeIngredient, TurnIntent
 from app.agent.state import AgentState
 from app.agent.storage import get_image_store
 
@@ -91,8 +91,53 @@ def render_recipe(recipe: GeneratedRecipe) -> str:
     return "\n".join(lines)
 
 
+def _render_parsed_photo(state: AgentState) -> dict[str, Any]:
+    """Hand a photo-parsed recipe on to the checklist, unchanged (CUE-88).
+
+    `parse_recipe_photo -> generate_recipe` is what lets a photo turn rejoin the
+    normal path and get a checklist and a cart like any other. What it must
+    *not* do is generate a second recipe: the photo has already been read, and
+    the latest message on a photo turn is a caption or nothing at all. So this
+    branch spends no model call and renders the parsed recipe for the
+    transcript - the reply `parse_recipe_photo_node` deliberately does not emit.
+
+    Gated on `turn_intent`, not on "a recipe is already in state": `recipe`
+    survives in the checkpoint across turns, so the second text turn of a
+    session always arrives with the first turn's recipe still set. Keying on
+    the intent of *this* turn is what stops that from silently swallowing a new
+    dish name.
+
+    Args:
+        state: The current graph state, on a turn the router labelled PHOTO.
+
+    Returns:
+        A partial state update carrying the transcript message. `recipe` is
+        already on state and is not rewritten.
+
+    Raises:
+        RecipeGenerationError: The turn is a photo turn but carries no parsed
+            recipe. That means `parse_recipe_photo_node` did not run or did not
+            store its result, which is a wiring bug - and falling back to
+            generating from the caption would silently answer with a different
+            dish than the one in the photo.
+    """
+    recipe = state.get("recipe")
+    if recipe is None:
+        logger.error(
+            "Photo turn for session %s reached generate_recipe with no parsed "
+            "recipe; refusing to generate one from the caption.",
+            state["session_id"],
+        )
+        raise RecipeGenerationError()
+    return {"messages": [AIMessage(content=render_recipe(recipe))]}
+
+
 async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
     """Generate a structured recipe for the dish named in the latest message.
+
+    On a turn the router labelled `PHOTO` this generates nothing: the recipe was
+    already read off the image upstream, and this node only renders it into the
+    transcript. See `_render_parsed_photo`.
 
     Extracts the dish name from `state["messages"][-1].content` (the latest
     user message) and calls the configured chat model with a structured-
@@ -115,12 +160,23 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
         total `AgentState` TypedDict under strict typing. `messages` is
         appended, not overwritten, by the `add_messages` reducer.
 
+        `have_marks` is cleared, because a new recipe means a new checklist.
+        The field survives in the checkpoint across turns, and
+        `normalize_ingredients_node` treats a non-empty `have_marks` as the
+        user's own answer and skips the pantry seed on that basis - so leaving
+        the *previous* turn's marks in place would suppress seeding on every
+        turn after the first, and let a mark meant for one dish decide an
+        identically named ingredient in another.
+
     Raises:
         ValueError: `state["messages"]` is empty, so there is no dish name to
             extract.
         RecipeGenerationError: The model failed to produce a valid
             structured recipe twice in a row (initial attempt + one retry).
     """
+    if state.get("turn_intent") is TurnIntent.PHOTO:
+        return _render_parsed_photo(state)
+
     messages = state["messages"]
     if not messages:
         raise ValueError(
@@ -159,7 +215,11 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
         # schema; this guards that contract defensively at runtime.
         raise RecipeGenerationError()
 
-    return {"recipe": recipe, "messages": [AIMessage(content=render_recipe(recipe))]}
+    return {
+        "recipe": recipe,
+        "messages": [AIMessage(content=render_recipe(recipe))],
+        "have_marks": set(),
+    }
 
 
 _PHOTO_SYSTEM_PROMPT = (
@@ -249,9 +309,10 @@ async def parse_recipe_photo_node(state: AgentState) -> dict[str, Any]:
             a non-empty Supabase Storage object path.
 
     Returns:
-        A partial state update containing the parsed `recipe`. This is a
-        partial dict rather than a full `AgentState` (see
-        `generate_recipe_node`'s docstring for why).
+        A partial state update containing the parsed `recipe`, and a cleared
+        `have_marks` for the reason `generate_recipe_node`'s docstring gives.
+        This is a partial dict rather than a full `AgentState` (see that
+        docstring for why).
 
     Raises:
         ValueError: `state["image_object_path"]` is missing or empty, so
@@ -317,4 +378,4 @@ async def parse_recipe_photo_node(state: AgentState) -> dict[str, Any]:
         # schema; this guards that contract defensively at runtime.
         raise RecipeGenerationError()
 
-    return {"recipe": recipe}
+    return {"recipe": recipe, "have_marks": set()}
