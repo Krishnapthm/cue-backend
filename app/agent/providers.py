@@ -36,7 +36,7 @@ def get_chat_model(
         A ready-to-invoke chat model for the configured provider.
     """
     choice = settings.model_for(role)
-    match settings.MODEL_PROVIDER:
+    match choice.provider or settings.MODEL_PROVIDER:
         case "openai":
             if choice.reasoning_effort is None:
                 return ChatOpenAI(model=choice.model_id)

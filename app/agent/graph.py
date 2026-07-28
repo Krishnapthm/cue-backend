@@ -34,6 +34,7 @@ from app.agent.nodes.normalize import normalize_ingredients_node
 from app.agent.nodes.order_status import order_status_node
 from app.agent.nodes.recipe import generate_recipe_node, parse_recipe_photo_node
 from app.agent.nodes.route import route_turn
+from app.agent.nodes.title import schedule_title_node
 from app.agent.state import AgentState
 from app.config import settings
 
@@ -46,6 +47,7 @@ CueGraph = CompiledStateGraph[AgentState, CueContext]
 
 ROUTE_TURN = "route_turn"
 GENERATE_RECIPE = "generate_recipe"
+SCHEDULE_TITLE = "schedule_title"
 PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
 NORMALIZE_INGREDIENTS = "normalize_ingredients"
@@ -94,6 +96,8 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     START -> route_turn --(recipe)--------------> generate_recipe
                  |                                      ^    |
                  +-------(photo)--> parse_recipe_photo --+    v
+                 |                                    schedule_title
+                 |                                            |
                  |                                    normalize_ingredients
                  |                                            |
                  |                                            v
@@ -126,9 +130,9 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     turn `generate_recipe` renders the already-parsed recipe rather than
     generating a second one - see `_render_parsed_photo`.
 
-    `generate_recipe -> normalize_ingredients -> confirm_checklist` are static
-    edges: there is no routing decision to make, every recipe turn produces a
-    checklist and every checklist is confirmed.
+    `generate_recipe -> schedule_title -> normalize_ingredients ->
+    confirm_checklist` are static edges: there is no routing decision to make,
+    every recipe turn produces a checklist and every checklist is confirmed.
 
     `confirm_checklist` is the graph's **only** interrupt, so a compiled graph
     without a checkpointer can run every branch except that pause. Checkout left
@@ -168,6 +172,7 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     )
     builder.add_node(ROUTE_TURN, route_turn)
     builder.add_node(GENERATE_RECIPE, generate_recipe_node)
+    builder.add_node(SCHEDULE_TITLE, schedule_title_node)
     builder.add_node(
         PARSE_RECIPE_PHOTO, parse_recipe_photo_node, retry_policy=NETWORK_RETRY
     )
@@ -183,7 +188,8 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_node(REFUSE, refuse_node)
     builder.add_edge(START, ROUTE_TURN)
     builder.add_edge(PARSE_RECIPE_PHOTO, GENERATE_RECIPE)
-    builder.add_edge(GENERATE_RECIPE, NORMALIZE_INGREDIENTS)
+    builder.add_edge(GENERATE_RECIPE, SCHEDULE_TITLE)
+    builder.add_edge(SCHEDULE_TITLE, NORMALIZE_INGREDIENTS)
     builder.add_edge(NORMALIZE_INGREDIENTS, CONFIRM_CHECKLIST)
     builder.add_node(COMPOSE_CART, compose_cart_node)
     builder.add_node(REPORT_CART, report_cart_node)

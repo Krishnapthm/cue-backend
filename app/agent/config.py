@@ -28,6 +28,9 @@ class ModelRole(StrEnum):
     * `ORDER_STATUS` - turns an already-fetched tracking payload into one
       sentence. There is no reasoning to do, the output is short, and the user
       is waiting, so the cheapest fast model wins outright.
+    * `TITLE` - condenses a resolved dish name into a short Recents label.
+      It is best-effort metadata, never part of the user's turn, so it uses a
+      cheap fast model with no reasoning effort.
 
     Deterministic nodes (`normalize_ingredients`, `select_variant`,
     `propose_substitute`, `report_cart`, `refuse`) take no model at all and
@@ -38,6 +41,7 @@ class ModelRole(StrEnum):
     RECIPE = "recipe"
     VISION = "vision"
     ORDER_STATUS = "order_status"
+    TITLE = "title"
 
 
 class ReasoningEffort(StrEnum):
@@ -66,6 +70,7 @@ class ModelChoice:
 
     model_id: str
     reasoning_effort: ReasoningEffort | None = None
+    provider: Literal["openai", "anthropic"] | None = None
 
 
 class AgentSettings(BaseSettings):
@@ -111,12 +116,21 @@ class AgentSettings(BaseSettings):
     # node rewrites a structured payload the service layer already validated
     # into one sentence - the model is doing wording, not judgement.
     MODEL_ORDER_STATUS: str = "gpt-5.4-nano-2026-03-17"
+    # Session titling is a low-stakes 2-4 word summarisation job. Haiku 4.5
+    # is the inexpensive, low-latency model available through the configured
+    # provider seam; deployments can replace it with AGENT_MODEL_TITLE.
+    MODEL_TITLE: str = "claude-haiku-4-5-20251001"
+    # Haiku is an Anthropic model while the primary cooking models use the
+    # configurable default provider. Keep this per-role override in settings
+    # alongside the id so deployments can change either without node edits.
+    MODEL_TITLE_PROVIDER: Literal["openai", "anthropic"] = "anthropic"
     # The router emits a four-way label from an explicit rubric; reasoning
     # tokens buy nothing there and are billed at output rates.
     MODEL_ROUTER_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
     # Same reasoning, and the stronger one: the user is waiting on this reply,
     # so latency spent thinking about a one-sentence status is latency wasted.
     MODEL_ORDER_STATUS_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
+    MODEL_TITLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
 
     # Checkpointer connection pool (CUE-93). This pool is the graph's, and it
     # is **separate from SQLAlchemy's** (`DATABASE_POOL_SIZE`): the checkpointer
@@ -170,6 +184,12 @@ class AgentSettings(BaseSettings):
                 return ModelChoice(
                     model_id=self.MODEL_ORDER_STATUS,
                     reasoning_effort=self.MODEL_ORDER_STATUS_REASONING_EFFORT,
+                )
+            case ModelRole.TITLE:
+                return ModelChoice(
+                    model_id=self.MODEL_TITLE,
+                    reasoning_effort=self.MODEL_TITLE_REASONING_EFFORT,
+                    provider=self.MODEL_TITLE_PROVIDER,
                 )
 
 
