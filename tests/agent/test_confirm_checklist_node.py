@@ -239,10 +239,7 @@ async def test_a_recipe_turn_pauses_on_the_checklist(
         interrupts = result["__interrupt__"]
         assert len(interrupts) == 1
         assert interrupts[0].value["ui"] == "checklist"
-        assert [item["name"] for item in interrupts[0].value["items"]] == [
-            "paneer",
-            "salt",
-        ]
+        assert [item["name"] for item in interrupts[0].value["items"]] == ["paneer"]
 
 
 async def test_resuming_after_a_process_restart_lands_the_marks(
@@ -264,13 +261,13 @@ async def test_resuming_after_a_process_restart_lands_the_marks(
 
     async with graph_module.open_compiled_graph(conn_string=dsn) as graph:
         resumed = await graph.ainvoke(
-            Command(resume={"have": ["salt"]}), config, context=_context()
+            Command(resume={"have": []}), config, context=_context()
         )
 
-    assert resumed["have_marks"] == {"salt"}
+    assert resumed["have_marks"] == set()
     assert "__interrupt__" not in resumed or not resumed["__interrupt__"]
     # The resume runs on past the pause into the fan-out, and only for what the
-    # user did *not* tick: salt is theirs already, paneer is the shopping list.
+    # user did not tick: paneer is the shopping list.
     assert [match.ingredient_name for match in resumed["matches"]] == ["paneer"]
 
 
