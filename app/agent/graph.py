@@ -13,6 +13,12 @@ from langgraph.types import RetryPolicy
 from app.agent.context import CueContext
 from app.agent.nodes.confirm_checklist import confirm_checklist
 from app.agent.nodes.guardrail import refuse_node
+from app.agent.nodes.match_ingredient import (
+    MATCH_INGREDIENT,
+    MatchTask,
+    fan_out,
+    match_ingredient,
+)
 from app.agent.nodes.normalize import normalize_ingredients_node
 from app.agent.nodes.order_status import order_status_node
 from app.agent.nodes.recipe import generate_recipe_node, parse_recipe_photo_node
@@ -48,13 +54,25 @@ REFUSE = "refuse"
 PROSE_NODES: frozenset[str] = frozenset({ORDER_STATUS})
 
 #: Retry policy for the nodes that reach off-box - the recipe photo fetch and
-#: parse, and the order-status lookup. A transient upstream failure is the
-#: system's problem to retry, not the user's problem to read about; anything
-#: that survives three attempts is a real failure and surfaces as one.
+#: parse, the order-status lookup, and each ingredient worker. A transient
+#: upstream failure is the system's problem to retry, not the user's problem to
+#: read about; anything that survives three attempts is a real failure and
+#: surfaces as one.
 #:
-#: Note this is retries of the *whole node*. Both nodes are safe to re-run:
-#: neither writes anything, and `list_orders_throttled`'s floor means a retried
-#: order-status node is served the cached list rather than re-hitting Swiggy.
+#: Note this is retries of the *whole node*. All three are safe to re-run:
+#: none of them writes anything, `list_orders_throttled`'s floor means a
+#: retried order-status node is served the cached list rather than re-hitting
+#: Swiggy, and an ingredient worker only searches and ranks.
+#:
+#: It is worth being explicit about what this policy does *not* do, because
+#: CUE-91 asks for both and they do not compose: a `RetryPolicy` re-raises once
+#: its attempts are exhausted, so it cannot also be the thing that degrades one
+#: worker's failure into an `unavailable` row. `add_node`'s `error_handler`
+#: argument looks like the missing piece but is inert in langgraph 1.2.9 - it
+#: is recorded on the node spec and read by nothing. Per-ingredient isolation
+#: therefore lives in the worker itself, which catches the failures that are
+#: about one ingredient and lets the ones that are about the whole turn
+#: through; see `match_ingredient`.
 NETWORK_RETRY = RetryPolicy(max_attempts=3)
 
 
@@ -69,6 +87,11 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
                  |                                            |
                  |                                            v
                  |                                    confirm_checklist  (pauses)
+                 |                                            |
+                 |                              (Send per NEED ingredient)
+                 |                                            |
+                 |                                            v
+                 |                                    match_ingredient  (xN)
                  |                                            |
                  |                                            v
                  |                                           END
@@ -95,8 +118,14 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     the graph entirely (CUE-80), which is why there is no second one - and why
     no non-idempotent mutation sits behind a pause at all.
 
-    `parse_recipe_photo` and `order_status` both reach off-box and carry
-    `NETWORK_RETRY`; see the note there.
+    The edge out of `confirm_checklist` is conditional and returns `Send`s, one
+    per ingredient the user still needs, so the workers run concurrently in a
+    single super-step. It is the one place the graph fans out, and it sits
+    *after* the interrupt on purpose: those searches are spent on the user's
+    say-so, so nothing in the fan-out may pause to ask for more.
+
+    `parse_recipe_photo`, `order_status` and `match_ingredient` all reach
+    off-box and carry `NETWORK_RETRY`; see the note there.
 
     There is deliberately **no** static edge out of `route_turn`: it routes
     with a `Command`, which adds a *dynamic* edge, and a static edge
@@ -128,12 +157,19 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_node(ORDER_STATUS, order_status_node, retry_policy=NETWORK_RETRY)
     builder.add_node(NORMALIZE_INGREDIENTS, normalize_ingredients_node)
     builder.add_node(CONFIRM_CHECKLIST, confirm_checklist)
+    builder.add_node(
+        MATCH_INGREDIENT,
+        match_ingredient,
+        input_schema=MatchTask,
+        retry_policy=NETWORK_RETRY,
+    )
     builder.add_node(REFUSE, refuse_node)
     builder.add_edge(START, ROUTE_TURN)
     builder.add_edge(PARSE_RECIPE_PHOTO, GENERATE_RECIPE)
     builder.add_edge(GENERATE_RECIPE, NORMALIZE_INGREDIENTS)
     builder.add_edge(NORMALIZE_INGREDIENTS, CONFIRM_CHECKLIST)
-    builder.add_edge(CONFIRM_CHECKLIST, END)
+    builder.add_conditional_edges(CONFIRM_CHECKLIST, fan_out, [MATCH_INGREDIENT, END])
+    builder.add_edge(MATCH_INGREDIENT, END)
     builder.add_edge(ORDER_STATUS, END)
     builder.add_edge(REFUSE, END)
     return builder
