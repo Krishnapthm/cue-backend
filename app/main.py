@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.addresses.router import router as addresses_router
+from app.agent.graph import open_compiled_graph
 from app.auth.router import router as auth_router
 from app.cart.router import router as cart_router
 from app.chat.router import router as chat_router
@@ -28,10 +29,28 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
-    """Manage startup and shutdown of app-wide resources."""
+async def lifespan(fastapi_app: FastAPI) -> AsyncGenerator[None]:
+    """Manage startup and shutdown of app-wide resources.
+
+    The agent graph is built and compiled **once per process** and stashed on
+    `app.state`, backed by a checkpointer connection pool. It used to be
+    per-request, which opened a dedicated connection per call; with long-lived
+    SSE streams that pinned one connection per open stream and a handful of
+    concurrent users exhausted the database (CUE-93).
+
+    Sharing one compiled graph across concurrent requests is safe by
+    construction: everything per-run travels in the run config (`thread_id`)
+    or in `CueContext`, both supplied per invocation.
+
+    The checkpointer's own tables are **not** provisioned here - that is DDL
+    and belongs to deployment, beside `alembic upgrade head`. See
+    `scripts/setup_checkpointer.py`.
+    """
     logger.info("Starting cue-api in %s", settings.ENVIRONMENT.value)
-    yield
+    async with open_compiled_graph() as graph:
+        fastapi_app.state.agent_graph = graph
+        logger.info("Agent graph compiled and its checkpointer pool opened")
+        yield
     await engine.dispose()
     logger.info("Database connections closed")
 

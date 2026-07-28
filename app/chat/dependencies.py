@@ -1,26 +1,40 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 
-from app.agent.graph import CueGraph, open_compiled_graph
+from app.agent.graph import CueGraph
 
 
-async def agent_graph() -> AsyncIterator[CueGraph]:
-    """Yield the compiled agent graph for the duration of one request.
+def agent_graph(request: Request) -> CueGraph:
+    """Return the process-wide compiled agent graph.
 
-    The graph is opened per request, which also opens a checkpointer
-    connection. If that proves too costly under load, the follow-up is an
-    app-lifespan-scoped compiled graph - this dependency is the seam where
-    that change would land, so no caller needs to know either way.
+    Cheap by design: the graph is built once in the FastAPI lifespan (see
+    `app.main.lifespan`) and this hands out that same instance. It is shared
+    across concurrent requests on purpose - nothing request-scoped is captured
+    at compile time, because everything per-run travels in the run config
+    (`thread_id`) or in `CueContext`.
 
-    Yields:
+    Args:
+        request: The incoming request, for its app state.
+
+    Returns:
         The compiled, checkpointed graph.
+
+    Raises:
+        RuntimeError: The app was started without its lifespan, so no graph was
+            ever compiled. Raised loudly rather than compiling one here: a
+            per-request graph is the exact thing CUE-93 removed, and silently
+            reintroducing it under load would be worse than failing.
     """
-    async with open_compiled_graph() as graph:
-        yield graph
+    graph: CueGraph | None = getattr(request.app.state, "agent_graph", None)
+    if graph is None:
+        raise RuntimeError(
+            "No compiled agent graph on app.state: the application was started "
+            "without running its lifespan."
+        )
+    return graph
 
 
 AgentGraph = Annotated[CueGraph, Depends(agent_graph)]

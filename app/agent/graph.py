@@ -3,13 +3,18 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import RetryPolicy
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
+from app.agent.config import agent_settings
 from app.agent.context import CueContext
 from app.agent.nodes.cart import (
     COMPOSE_CART,
@@ -218,39 +223,102 @@ def thread_config(thread_id: str) -> RunnableConfig:
     return {"configurable": {"thread_id": thread_id}}
 
 
-def _checkpointer_conn_string() -> str:
+def _checkpointer_conn_string(conn_string: str | None = None) -> str:
     """Return a psycopg-compatible DSN for the checkpointer.
 
     `AsyncPostgresSaver` speaks psycopg (psycopg3), not SQLAlchemy's asyncpg
-    driver, so the `+asyncpg` suffix is stripped from the shared
-    `DATABASE_URL`.
+    driver, so the `+asyncpg` suffix is stripped. An override is normalized the
+    same way, so a caller can hand over whichever spelling of the URL it
+    happens to be holding.
+
+    Args:
+        conn_string: Override DSN; defaults to the app database.
+
+    Returns:
+        The DSN psycopg will accept.
     """
-    return str(settings.DATABASE_URL).replace("postgresql+asyncpg", "postgresql")
+    dsn = conn_string or str(settings.DATABASE_URL)
+    return dsn.replace("postgresql+asyncpg", "postgresql")
+
+
+async def setup_checkpointer(conn_string: str | None = None) -> None:
+    """Provision the checkpointer's tables. **A deployment step, not a startup one.**
+
+    This is DDL. It belongs beside `alembic upgrade head` in a deploy, run once
+    against the database, and it deliberately does not run when the app boots:
+    every process doing DDL on every start is a round-trip per boot at best and
+    a migration race at worst. `scripts/setup_checkpointer.py` is the entry
+    point; `open_compiled_graph` assumes the tables already exist.
+
+    Args:
+        conn_string: Override DSN; defaults to the app database.
+    """
+    async with AsyncPostgresSaver.from_conn_string(
+        _checkpointer_conn_string(conn_string)
+    ) as checkpointer:
+        await checkpointer.setup()
 
 
 @asynccontextmanager
 async def open_compiled_graph(
     conn_string: str | None = None,
+    *,
+    min_size: int | None = None,
+    max_size: int | None = None,
 ) -> AsyncIterator[CueGraph]:
-    """Yield the compiled graph wired to a Postgres checkpointer.
+    """Yield one compiled graph, backed by a checkpointer connection *pool*.
 
-    The checkpointer persists state against the same database as the app,
-    keyed by `thread_id = str(chat_session.id)` supplied per-invocation in the
-    run config. Callers use it as an async context manager so the underlying
-    connection is closed on exit:
+    Opened once per process from the FastAPI lifespan (see `app.main`), not
+    once per request. A request-scoped graph recompiled the graph and opened a
+    dedicated connection every call, which was tolerable for short `ainvoke`
+    turns and is not once SSE streams are long-lived: every open stream pinned
+    a connection for its whole duration, and a handful of concurrent users
+    exhausted the pool. Pooled, a connection is borrowed for each checkpoint
+    read or write and returned immediately, so open streams cost nothing while
+    they are idle.
 
     ```python
     async with open_compiled_graph() as graph:
-        await graph.ainvoke(state, {"configurable": {"thread_id": session_id}})
+        await graph.ainvoke(state, thread_config(session_id), context=context)
     ```
+
+    **The compiled graph is shared across concurrent requests, which is fine
+    and intended.** Every per-run input travels in the run config (`thread_id`)
+    or in `CueContext`, both supplied per invocation; nothing request-scoped is
+    captured at compile time. That is exactly why `CueContext` exists - a
+    session closed over by the compiled graph would be shared across users,
+    which is the worst possible version of this bug.
+
+    `setup()` is *not* called here; see `setup_checkpointer`.
 
     Args:
         conn_string: Override DSN (used by tests); defaults to the app database.
+        min_size: Connections kept warm; defaults to the configured setting.
+        max_size: Pool ceiling; defaults to the configured setting.
 
     Yields:
-        The compiled, checkpointed graph.
+        The compiled, checkpointed graph. The pool closes on exit.
     """
-    dsn = conn_string or _checkpointer_conn_string()
-    async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
-        await checkpointer.setup()
+    dsn = _checkpointer_conn_string(conn_string)
+    async with AsyncConnectionPool(
+        conninfo=dsn,
+        min_size=agent_settings.CHECKPOINTER_POOL_MIN_SIZE
+        if min_size is None
+        else min_size,
+        max_size=agent_settings.CHECKPOINTER_POOL_MAX_SIZE
+        if max_size is None
+        else max_size,
+        # Both are required by `AsyncPostgresSaver`: it issues its own
+        # transactions, and reads rows back as mappings.
+        kwargs={"autocommit": True, "row_factory": dict_row},
+        open=False,
+    ) as pool:
+        await pool.open(wait=True)
+        # `row_factory=dict_row` above is what actually makes this pool hand
+        # out dict rows, but it is passed as a runtime kwarg, so the
+        # constructor's return type still says tuples. The cast states what the
+        # kwargs already guarantee.
+        checkpointer = AsyncPostgresSaver(
+            cast("AsyncConnectionPool[AsyncConnection[dict[str, Any]]]", pool)
+        )
         yield build_graph().compile(checkpointer=checkpointer)
