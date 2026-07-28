@@ -539,3 +539,78 @@ async def test_the_turn_carries_the_runtime_context_not_a_state_session(
     assert call.context.session is not None
     # The session travels on the context, never in the checkpointed state.
     assert "session" not in call.state
+
+
+# --- the image intake path (CUE-88) ------------------------------------------
+
+
+async def test_an_image_turn_reaches_the_agent_with_its_object_path(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # This is the `ChatMessage.payload` -> `AgentState` extraction CUE-23
+    # deferred. `route_turn` branches on `image_object_path` alone, so it has to
+    # arrive set or the photo path is unreachable.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={
+            "role": "user",
+            "kind": "image",
+            "payload": {"object_path": "recipes/u1/8f2c.jpg"},
+        },
+    )
+
+    assert response.status_code == 201
+    assert fake_agent.calls[0].state["image_object_path"] == "recipes/u1/8f2c.jpg"
+
+
+async def test_a_text_turn_carries_no_image_path(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The field survives in the checkpoint, so a text turn must actively clear
+    # it - otherwise the turn after a photo would re-read the stale photo.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    assert fake_agent.calls[0].state["image_object_path"] is None
+
+
+async def test_an_image_turn_with_no_object_path_is_422(
+    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+) -> None:
+    # An unusable payload should fail at the boundary, not several seconds into
+    # a turn the user is watching.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "kind": "image", "payload": {"url": "https://x/y.jpg"}},
+    )
+
+    assert response.status_code == 422
+    assert fake_agent.calls == []
+
+
+async def test_an_image_turn_with_a_blank_object_path_is_422(
+    authed_client: httpx.AsyncClient, fake_agent: FakeAgentGraph
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "kind": "image", "payload": {"object_path": ""}},
+    )
+
+    assert response.status_code == 422
+    assert fake_agent.calls == []

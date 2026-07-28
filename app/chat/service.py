@@ -198,15 +198,17 @@ async def append_message(
     return message
 
 
-def _runs_the_agent(request: CreateMessageRequest) -> bool:
-    """Return whether this message should be handed to the agent.
+#: The message kinds a user can start a turn with. Text is a dish name or a
+#: question; an image is an uploaded recipe photo, which CUE-88 routes to the
+#: vision path. Everything else - a `checklist` or `cart_ready` append, or
+#: anything authored by the assistant - is a transcript write, and must never
+#: burn a model call.
+_AGENT_KINDS = frozenset({MessageKind.TEXT, MessageKind.IMAGE})
 
-    Only a user's text turn does. Every other combination persists exactly
-    as it always has and reports no assistant reply - preserving the
-    behaviour the app's other write paths depend on, and making sure a
-    checklist or image append never burns a model call.
-    """
-    return request.role is MessageRole.USER and request.kind is MessageKind.TEXT
+
+def _runs_the_agent(request: CreateMessageRequest) -> bool:
+    """Return whether this message should be handed to the agent."""
+    return request.role is MessageRole.USER and request.kind in _AGENT_KINDS
 
 
 def _reply_text(messages: list[BaseMessage]) -> str | None:
@@ -225,11 +227,22 @@ def _turn_state(
 
     Only the user's new turn goes in: the rest of the transcript is replayed
     by the checkpointer under the same `thread_id`.
+
+    An image turn carries its uploaded object path onto
+    `image_object_path` - this is the `ChatMessage.payload` -> state extraction
+    at the app/graph boundary that CUE-23 deferred. `route_turn` branches on
+    that field alone, which is exactly why it is set here from the upload rather
+    than from anything the user can type.
+
+    It is written on every turn, `None` included: the field survives in the
+    checkpoint, so leaving a previous turn's path in place would route the next
+    text turn back into the vision path and re-read a stale photo.
     """
     return {
         "session_id": str(session_id),
         "user_id": user_id,
         "messages": [HumanMessage(content=request.content or "")],
+        "image_object_path": request.image_object_path(),
     }
 
 

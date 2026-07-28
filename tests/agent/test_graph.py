@@ -18,15 +18,17 @@ import pytest
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import RetryPolicy
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import graph as graph_module
 from app.agent.context import CueContext
 from app.agent.exceptions import RecipeGenerationError
+from app.agent.nodes import order_status as order_status_module
 from app.agent.nodes import recipe as recipe_module
 from app.agent.nodes import route as route_module
 from app.agent.nodes.guardrail import REFUSAL_MESSAGE
-from app.agent.nodes.order_status import ORDER_STATUS_PENDING_MESSAGE
+from app.agent.nodes.order_status import NO_ORDERS_MESSAGE
 from app.agent.schemas import (
     GeneratedRecipe,
     IngredientStatus,
@@ -35,8 +37,11 @@ from app.agent.schemas import (
     TurnIntent,
 )
 from app.agent.state import AgentState
+from app.instamart.exceptions import InstamartAuthError
 from app.models.pantry import PantryItem
 from app.models.user import User
+from app.orders import service as orders_service
+from app.orders.schemas import OrderListItem, OrderStatus
 from app.pantry import service as pantry_service
 from app.pantry.constants import LEVEL_MAX, PantryCategory
 from app.pantry.service import normalize_name
@@ -71,6 +76,23 @@ class _FakeImageStore:
 
     async def load(self, _object_path: str) -> bytes:
         return b"\xff\xd8\xff\xe0jpeg-ish-fixture-bytes"
+
+
+class _ProseRunnable:
+    """A plain (non-structured) chat model stand-in for the prose nodes."""
+
+    def __init__(self, replies: list[Any]) -> None:
+        self.replies = list(replies)
+        self.calls = 0
+        self.prompts: list[Any] = []
+
+    async def ainvoke(self, prompt: list[Any]) -> Any:
+        self.calls += 1
+        self.prompts.append(prompt)
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
 
 class _CountingChatModel:
@@ -155,6 +177,41 @@ def _context(session: AsyncSession | None = None, user_id: int = 1) -> CueContex
     )
 
 
+def _order(
+    status: OrderStatus = OrderStatus.OUT_FOR_DELIVERY, order_id: str = "ord-1"
+) -> OrderListItem:
+    return OrderListItem(
+        order_id=order_id,
+        status=status,
+        placed_at="2026-07-28T10:00:00Z",
+        items=["Paneer", "Butter"],
+        total=None,
+    )
+
+
+def _stub_order_status(
+    monkeypatch: pytest.MonkeyPatch, replies: list[Any]
+) -> _ProseRunnable:
+    """Stub the order-status node's prose model (it is not structured output)."""
+    prose = _ProseRunnable(replies)
+    monkeypatch.setattr(order_status_module, "get_chat_model", lambda _role: prose)
+    return prose
+
+
+def _stub_orders(
+    monkeypatch: pytest.MonkeyPatch, orders: list[OrderListItem]
+) -> list[int]:
+    """Stub the throttled order read, returning a per-call counter."""
+    calls: list[int] = []
+
+    async def _list(_session: object, _user_id: int) -> list[OrderListItem]:
+        calls.append(1)
+        return orders
+
+    monkeypatch.setattr(orders_service, "list_orders_throttled", _list)
+    return calls
+
+
 # --- graph shape -----------------------------------------------------------
 
 
@@ -172,8 +229,11 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
     } <= set(drawable.nodes)
     edges = {(e.source, e.target) for e in drawable.edges}
     assert ("__start__", "route_turn") in edges
-    for branch in ("parse_recipe_photo", "order_status", "refuse"):
+    for branch in ("order_status", "refuse"):
         assert (branch, "__end__") in edges
+    # The photo path converges on the text path instead of ending on its own.
+    assert ("parse_recipe_photo", "generate_recipe") in edges
+    assert ("parse_recipe_photo", "__end__") not in edges
 
 
 def test_the_recipe_branch_runs_through_the_checklist() -> None:
@@ -373,17 +433,53 @@ async def test_recipe_generation_error_bubbles_out_of_the_graph(
 
 
 async def test_an_order_status_turn_reaches_the_order_status_branch(
-    stub_models: dict[str, _CountingRunnable],
+    monkeypatch: pytest.MonkeyPatch, stub_models: dict[str, _CountingRunnable]
 ) -> None:
     # Nothing queued for the recipe model: reaching it would raise IndexError.
     stub_models["router"].results = [_intent(TurnIntent.ORDER_STATUS)]
+    prose = _stub_order_status(monkeypatch, [AIMessage(content="It's on its way.")])
+    _stub_orders(monkeypatch, [_order(OrderStatus.OUT_FOR_DELIVERY)])
     graph = graph_module.build_graph().compile()
 
     result = await graph.ainvoke(_state("where is my order"), context=_context())
 
     assert stub_models["recipe"].calls == 0
     assert result["turn_intent"] is TurnIntent.ORDER_STATUS
-    assert str(result["messages"][-1].content) == ORDER_STATUS_PENDING_MESSAGE
+    assert str(result["messages"][-1].content) == "It's on its way."
+    assert prose.calls == 1
+
+
+async def test_an_order_status_turn_with_no_orders_skips_the_model(
+    monkeypatch: pytest.MonkeyPatch, stub_models: dict[str, _CountingRunnable]
+) -> None:
+    stub_models["router"].results = [_intent(TurnIntent.ORDER_STATUS)]
+    # Nothing queued: a model call here would raise IndexError.
+    prose = _stub_order_status(monkeypatch, [])
+    _stub_orders(monkeypatch, [])
+    graph = graph_module.build_graph().compile()
+
+    result = await graph.ainvoke(_state("where is my order"), context=_context())
+
+    assert prose.calls == 0
+    assert str(result["messages"][-1].content) == NO_ORDERS_MESSAGE
+
+
+async def test_an_expired_swiggy_link_bubbles_out_of_the_order_status_branch(
+    monkeypatch: pytest.MonkeyPatch, stub_models: dict[str, _CountingRunnable]
+) -> None:
+    # Reconnecting is the user's action to take, and `stream_turn` turns this
+    # into an error event naming it. Swallowing it here would lose that.
+    stub_models["router"].results = [_intent(TurnIntent.ORDER_STATUS)]
+    _stub_order_status(monkeypatch, [])
+
+    async def _raise(_session: object, _user_id: int) -> list[OrderListItem]:
+        raise InstamartAuthError
+
+    monkeypatch.setattr(orders_service, "list_orders_throttled", _raise)
+    graph = graph_module.build_graph().compile()
+
+    with pytest.raises(InstamartAuthError):
+        await graph.ainvoke(_state("where is my order"), context=_context())
 
 
 async def test_a_photo_turn_reaches_the_photo_branch_without_a_router_call(
@@ -403,6 +499,37 @@ async def test_a_photo_turn_reaches_the_photo_branch_without_a_router_call(
     assert stub_models["router"].calls == 0
     assert result["turn_intent"] is TurnIntent.PHOTO
     assert result["recipe"] == recipe
+
+
+async def test_a_photo_turn_produces_a_checklist_with_no_text_input(
+    monkeypatch: pytest.MonkeyPatch, stub_models: dict[str, _CountingRunnable]
+) -> None:
+    """A photo turn rejoins the normal path: recipe, transcript reply, checklist.
+
+    The one queued result is the *photo parse*. `generate_recipe` renders that
+    recipe rather than generating a second one, so a second model call would pop
+    from an empty list and fail - which is how this asserts the skip.
+    """
+    recipe = _recipe("lasagna")
+    stub_models["recipe"].results = [recipe]
+    monkeypatch.setattr(recipe_module, "get_image_store", lambda: _FakeImageStore())
+    graph = graph_module.build_graph().compile()
+
+    state = _state("")
+    state["image_object_path"] = "recipes/u1/photo.jpg"
+    result = await graph.ainvoke(state, context=_context())
+
+    assert stub_models["recipe"].calls == 1
+    assert result["recipe"] == recipe
+    # The parsed recipe reaches the transcript, and the checklist is built from
+    # it exactly as it is for a typed dish name.
+    reply = str(result["messages"][-1].content)
+    assert "lasagna" in reply.lower()
+    assert [row.name for row in result["normalized_ingredients"]] == [
+        "paneer",
+        "butter",
+        "salt",
+    ]
 
 
 # --- run config ------------------------------------------------------------
@@ -482,3 +609,24 @@ async def test_two_threads_do_not_see_each_others_messages(
     assert len(first["messages"]) == 2
     assert len(second["messages"]) == 2
     assert "something off topic" not in [str(m.content) for m in second["messages"]]
+
+
+# --- retries ---------------------------------------------------------------
+
+
+def test_the_off_box_nodes_retry_and_the_local_ones_do_not() -> None:
+    # A transient upstream failure is the system's problem to retry, not the
+    # user's problem to read about. The nodes that reach no further than the
+    # process get no retry: re-running them would only repeat a real bug.
+    builder = graph_module.build_graph()
+
+    retried = {
+        name: node.retry_policy
+        for name, node in builder.nodes.items()
+        if node.retry_policy
+    }
+    assert set(retried) == {"parse_recipe_photo", "order_status"}
+    for policy in retried.values():
+        # LangGraph accepts one policy or a sequence of them; we set exactly one.
+        policies = [policy] if isinstance(policy, RetryPolicy) else list(policy)
+        assert [each.max_attempts for each in policies] == [3]
