@@ -20,15 +20,17 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from app.agent import graph as graph_module
+from app.agent.context import CueContext
 from app.agent.exceptions import RecipeGenerationError
-from app.agent.nodes import guardrail as guardrail_module
 from app.agent.nodes import recipe as recipe_module
+from app.agent.nodes import route as route_module
 from app.agent.nodes.guardrail import REFUSAL_MESSAGE
+from app.agent.nodes.order_status import ORDER_STATUS_PENDING_MESSAGE
 from app.agent.schemas import (
     GeneratedRecipe,
-    GuardrailDecision,
     RecipeIngredient,
-    ScopeVerdict,
+    TurnClassification,
+    TurnIntent,
 )
 from app.agent.state import AgentState
 
@@ -53,6 +55,13 @@ class _CountingRunnable:
         return result
 
 
+class _FakeImageStore:
+    """Stands in for the Supabase image store the photo branch reads through."""
+
+    async def load(self, _object_path: str) -> bytes:
+        return b"\xff\xd8\xff\xe0jpeg-ish-fixture-bytes"
+
+
 class _CountingChatModel:
     def __init__(self, runnable: _CountingRunnable) -> None:
         self._runnable = runnable
@@ -71,12 +80,12 @@ def stub_models(monkeypatch: pytest.MonkeyPatch) -> dict[str, _CountingRunnable]
     guard = _CountingRunnable([])
     recipe = _CountingRunnable([])
     monkeypatch.setattr(
-        guardrail_module, "get_chat_model", lambda _role: _CountingChatModel(guard)
+        route_module, "get_chat_model", lambda _role: _CountingChatModel(guard)
     )
     monkeypatch.setattr(
         recipe_module, "get_chat_model", lambda _role: _CountingChatModel(recipe)
     )
-    return {"guardrail": guard, "recipe": recipe}
+    return {"router": guard, "recipe": recipe}
 
 
 def _recipe(dish_name: str = "paneer butter masala") -> GeneratedRecipe:
@@ -100,26 +109,54 @@ def _state(message: str, session_id: str = "session-1") -> AgentState:
     }
 
 
-def _verdict(verdict: ScopeVerdict) -> GuardrailDecision:
-    return GuardrailDecision(verdict=verdict, reason="internal note")
+def _intent(intent: TurnIntent) -> TurnClassification:
+    return TurnClassification(intent=intent, reason="internal note")
+
+
+def _context() -> CueContext:
+    """The runtime context every invocation supplies; no node here reads it."""
+    return CueContext(
+        session=None,  # type: ignore[arg-type]
+        user_id=1,
+        chat_session_id=uuid.uuid4(),
+        address_id="addr-1",
+    )
 
 
 # --- graph shape -----------------------------------------------------------
 
 
-def test_graph_has_the_three_nodes_and_no_static_edge_out_of_guardrail() -> None:
+def test_graph_has_every_branch_the_router_can_reach() -> None:
     compiled = graph_module.build_graph().compile()
     drawable = compiled.get_graph()
 
-    assert {"guardrail", "generate_recipe", "refuse"} <= set(drawable.nodes)
+    assert {
+        "route_turn",
+        "generate_recipe",
+        "parse_recipe_photo",
+        "order_status",
+        "refuse",
+    } <= set(drawable.nodes)
     edges = {(e.source, e.target) for e in drawable.edges}
-    assert ("__start__", "guardrail") in edges
-    assert ("generate_recipe", "__end__") in edges
-    assert ("refuse", "__end__") in edges
-    # Routing out of the guardrail is dynamic (Command). A static edge here
-    # would fire alongside the Command and run both branches.
-    static_out = {t for s, t in edges if s == "guardrail"}
-    assert static_out <= {"generate_recipe", "refuse"}
+    assert ("__start__", "route_turn") in edges
+    for branch in ("generate_recipe", "parse_recipe_photo", "order_status", "refuse"):
+        assert (branch, "__end__") in edges
+
+
+def test_there_is_no_static_edge_out_of_the_router() -> None:
+    # `Command` adds a *dynamic* edge; a static one declared alongside it
+    # would fire too, and both branches would run.
+    drawable = graph_module.build_graph().compile().get_graph()
+
+    out_of_router = [e for e in drawable.edges if e.source == "route_turn"]
+    assert out_of_router, "the router should reach its branches"
+    assert all(edge.conditional for edge in out_of_router)
+
+
+def test_the_guardrail_node_is_gone() -> None:
+    assert "guardrail" not in set(
+        graph_module.build_graph().compile().get_graph().nodes
+    )
 
 
 def test_smoke_test_node_is_gone() -> None:
@@ -134,11 +171,11 @@ async def test_in_scope_turn_returns_a_recipe_and_one_reply(
     stub_models: dict[str, _CountingRunnable],
 ) -> None:
     recipe = _recipe()
-    stub_models["guardrail"].results = [_verdict(ScopeVerdict.IN_SCOPE)]
+    stub_models["router"].results = [_intent(TurnIntent.RECIPE)]
     stub_models["recipe"].results = [recipe]
     graph = graph_module.build_graph().compile()
 
-    result = await graph.ainvoke(_state("paneer butter masala"))
+    result = await graph.ainvoke(_state("paneer butter masala"), context=_context())
 
     assert result["recipe"] == recipe
     replies = [m for m in result["messages"] if isinstance(m, AIMessage)]
@@ -155,13 +192,13 @@ async def test_in_scope_turn_returns_a_recipe_and_one_reply(
 async def test_in_scope_turn_calls_the_recipe_model_once(
     stub_models: dict[str, _CountingRunnable],
 ) -> None:
-    stub_models["guardrail"].results = [_verdict(ScopeVerdict.IN_SCOPE)]
+    stub_models["router"].results = [_intent(TurnIntent.RECIPE)]
     stub_models["recipe"].results = [_recipe()]
     graph = graph_module.build_graph().compile()
 
-    await graph.ainvoke(_state("paneer butter masala"))
+    await graph.ainvoke(_state("paneer butter masala"), context=_context())
 
-    assert stub_models["guardrail"].calls == 1
+    assert stub_models["router"].calls == 1
     assert stub_models["recipe"].calls == 1
 
 
@@ -171,12 +208,12 @@ async def test_in_scope_turn_calls_the_recipe_model_once(
 async def test_out_of_scope_turn_refuses_without_a_recipe_model_call(
     stub_models: dict[str, _CountingRunnable],
 ) -> None:
-    stub_models["guardrail"].results = [_verdict(ScopeVerdict.OUT_OF_SCOPE)]
+    stub_models["router"].results = [_intent(TurnIntent.OUT_OF_SCOPE)]
     # Nothing queued for the recipe model: reaching it would raise IndexError,
     # so this asserts the skip twice over.
     graph = graph_module.build_graph().compile()
 
-    result = await graph.ainvoke(_state(INJECTION))
+    result = await graph.ainvoke(_state(INJECTION), context=_context())
 
     assert stub_models["recipe"].calls == 0
     assert result.get("recipe") is None
@@ -188,14 +225,14 @@ async def test_out_of_scope_turn_refuses_without_a_recipe_model_call(
 async def test_the_refusal_leaks_nothing_from_the_injected_turn(
     stub_models: dict[str, _CountingRunnable],
 ) -> None:
-    stub_models["guardrail"].results = [
-        GuardrailDecision(
-            verdict=ScopeVerdict.OUT_OF_SCOPE, reason="user asked for a python script"
+    stub_models["router"].results = [
+        TurnClassification(
+            intent=TurnIntent.OUT_OF_SCOPE, reason="user asked for a python script"
         )
     ]
     graph = graph_module.build_graph().compile()
 
-    result = await graph.ainvoke(_state(INJECTION))
+    result = await graph.ainvoke(_state(INJECTION), context=_context())
 
     reply = str(next(m for m in result["messages"] if isinstance(m, AIMessage)).content)
     # Neither the user's text nor the model-controlled `reason` is echoed:
@@ -208,10 +245,10 @@ async def test_an_unclassifiable_turn_fails_closed_to_refusal(
     stub_models: dict[str, _CountingRunnable],
 ) -> None:
     error = OutputParserException("not json")
-    stub_models["guardrail"].results = [error, error]
+    stub_models["router"].results = [error, error]
     graph = graph_module.build_graph().compile()
 
-    result = await graph.ainvoke(_state("paneer butter masala"))
+    result = await graph.ainvoke(_state("paneer butter masala"), context=_context())
 
     assert stub_models["recipe"].calls == 0
     assert str(result["messages"][-1].content) == REFUSAL_MESSAGE
@@ -221,14 +258,50 @@ async def test_recipe_generation_error_bubbles_out_of_the_graph(
     stub_models: dict[str, _CountingRunnable],
 ) -> None:
     error = OutputParserException("not json")
-    stub_models["guardrail"].results = [_verdict(ScopeVerdict.IN_SCOPE)]
+    stub_models["router"].results = [_intent(TurnIntent.RECIPE)]
     stub_models["recipe"].results = [error, error]
     graph = graph_module.build_graph().compile()
 
     # Swallowing this inside the graph would strand the turn with no reply
     # and no error; the endpoint maps it to a domain error instead.
     with pytest.raises(RecipeGenerationError):
-        await graph.ainvoke(_state("paneer butter masala"))
+        await graph.ainvoke(_state("paneer butter masala"), context=_context())
+
+
+# --- the branches added with the router --------------------------------------
+
+
+async def test_an_order_status_turn_reaches_the_order_status_branch(
+    stub_models: dict[str, _CountingRunnable],
+) -> None:
+    # Nothing queued for the recipe model: reaching it would raise IndexError.
+    stub_models["router"].results = [_intent(TurnIntent.ORDER_STATUS)]
+    graph = graph_module.build_graph().compile()
+
+    result = await graph.ainvoke(_state("where is my order"), context=_context())
+
+    assert stub_models["recipe"].calls == 0
+    assert result["turn_intent"] is TurnIntent.ORDER_STATUS
+    assert str(result["messages"][-1].content) == ORDER_STATUS_PENDING_MESSAGE
+
+
+async def test_a_photo_turn_reaches_the_photo_branch_without_a_router_call(
+    monkeypatch: pytest.MonkeyPatch, stub_models: dict[str, _CountingRunnable]
+) -> None:
+    recipe = _recipe("lasagna")
+    stub_models["recipe"].results = [recipe]
+    monkeypatch.setattr(recipe_module, "get_image_store", lambda: _FakeImageStore())
+    graph = graph_module.build_graph().compile()
+
+    state = _state("here's the page")
+    state["image_object_path"] = "recipes/u1/photo.jpg"
+    result = await graph.ainvoke(state, context=_context())
+
+    # The photo path is decided on a fact the user cannot type, so the router
+    # model is never asked.
+    assert stub_models["router"].calls == 0
+    assert result["turn_intent"] is TurnIntent.PHOTO
+    assert result["recipe"] == recipe
 
 
 # --- run config ------------------------------------------------------------
@@ -256,19 +329,23 @@ async def test_checkpointer_persists_the_transcript_across_turns(
     thread_id = str(uuid.uuid4())
     config: RunnableConfig = graph_module.thread_config(thread_id)
 
-    stub_models["guardrail"].results = [
-        _verdict(ScopeVerdict.IN_SCOPE),
-        _verdict(ScopeVerdict.OUT_OF_SCOPE),
+    stub_models["router"].results = [
+        _intent(TurnIntent.RECIPE),
+        _intent(TurnIntent.OUT_OF_SCOPE),
     ]
     stub_models["recipe"].results = [_recipe()]
 
     async with graph_module.open_compiled_graph(conn_string=dsn) as graph:
-        first = await graph.ainvoke(_state("paneer butter masala", thread_id), config)
+        first = await graph.ainvoke(
+            _state("paneer butter masala", thread_id), config, context=_context()
+        )
         assert len(first["messages"]) == 2  # the user turn + the recipe reply
 
         # The second turn replays the checkpointed transcript rather than
         # starting clean - proving the checkpointer is live, not just wired.
-        second = await graph.ainvoke(_state(INJECTION, thread_id), config)
+        second = await graph.ainvoke(
+            _state(INJECTION, thread_id), config, context=_context()
+        )
         assert len(second["messages"]) == 4
         assert str(second["messages"][-1].content) == REFUSAL_MESSAGE
         # The refused turn left the earlier recipe alone.
@@ -282,19 +359,23 @@ async def test_two_threads_do_not_see_each_others_messages(
     postgres_url: str, stub_models: dict[str, _CountingRunnable]
 ) -> None:
     dsn = postgres_url.replace("postgresql+asyncpg", "postgresql")
-    stub_models["guardrail"].results = [
-        _verdict(ScopeVerdict.OUT_OF_SCOPE),
-        _verdict(ScopeVerdict.OUT_OF_SCOPE),
+    stub_models["router"].results = [
+        _intent(TurnIntent.OUT_OF_SCOPE),
+        _intent(TurnIntent.OUT_OF_SCOPE),
     ]
 
     async with graph_module.open_compiled_graph(conn_string=dsn) as graph:
         one = str(uuid.uuid4())
         two = str(uuid.uuid4())
         first = await graph.ainvoke(
-            _state("something off topic", one), graph_module.thread_config(one)
+            _state("something off topic", one),
+            graph_module.thread_config(one),
+            context=_context(),
         )
         second = await graph.ainvoke(
-            _state("something else off topic", two), graph_module.thread_config(two)
+            _state("something else off topic", two),
+            graph_module.thread_config(two),
+            context=_context(),
         )
 
     assert len(first["messages"]) == 2

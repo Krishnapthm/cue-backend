@@ -70,6 +70,24 @@ class TurnIntent(StrEnum):
     ORDER_STATUS = "order_status"
 
 
+class TurnClassification(BaseModel):
+    """The entry router's read of one user turn (CUE-86).
+
+    The structured-output schema `route_turn` asks the router model for. It is
+    restated as a `GuardrailDecision` for state and traces, which is why that
+    model is unchanged by the four-path refactor.
+
+    `reason` is a short, model-controlled rationale kept for logs and traces
+    only, and carries the same rule as `GuardrailDecision.reason`: it is never
+    rendered to the user, because concatenating attacker-influenced text into
+    the reply would reintroduce the very injection vector this node exists to
+    close.
+    """
+
+    intent: TurnIntent
+    reason: str
+
+
 class MatchResult(BaseModel):
     """One ingredient resolved against Instamart, as the graph carries it.
 

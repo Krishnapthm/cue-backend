@@ -10,8 +10,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.context import CueContext
-from app.agent.nodes.guardrail import guardrail_node, refuse_node
-from app.agent.nodes.recipe import generate_recipe_node
+from app.agent.nodes.guardrail import refuse_node
+from app.agent.nodes.order_status import order_status_node
+from app.agent.nodes.recipe import generate_recipe_node, parse_recipe_photo_node
+from app.agent.nodes.route import route_turn
 from app.agent.state import AgentState
 from app.config import settings
 
@@ -22,8 +24,10 @@ logger = logging.getLogger(__name__)
 #: invocation is a type error rather than an `AttributeError` inside a node.
 CueGraph = CompiledStateGraph[AgentState, CueContext]
 
-GUARDRAIL = "guardrail"
+ROUTE_TURN = "route_turn"
 GENERATE_RECIPE = "generate_recipe"
+PARSE_RECIPE_PHOTO = "parse_recipe_photo"
+ORDER_STATUS = "order_status"
 REFUSE = "refuse"
 
 
@@ -31,19 +35,27 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     """Build the agent's (uncompiled) chat loop.
 
     ```
-    START -> guardrail ---(in_scope)---> generate_recipe -> END
+    START -> route_turn --(recipe)-------> generate_recipe ---> END
                  |
-                 +------(out_of_scope)-> refuse ---------> END
+                 +-------(photo)--------> parse_recipe_photo -> END
+                 |
+                 +-------(order_status)-> order_status ------> END
+                 |
+                 +-------(out_of_scope)-> refuse ------------> END
     ```
 
-    This is the smallest graph that delivers the product's core loop: the
-    user names a dish and gets its ingredient list back, and off-topic turns
-    are turned away before any recipe model call.
+    Every turn enters through the router, which both labels the turn and
+    picks its branch, so off-topic turns are turned away before any recipe
+    model call. `normalize_ingredients_node` stays unwired.
 
-    There is deliberately **no** static edge out of `guardrail`: it routes
+    There is deliberately **no** static edge out of `route_turn`: it routes
     with a `Command`, which adds a *dynamic* edge, and a static edge
-    alongside it would run both branches. `parse_recipe_photo_node` and
-    `normalize_ingredients_node` stay unwired - text input only, for now.
+    alongside it would run both branches. The destinations are declared
+    through the node's `Command[...]` return annotation instead.
+
+    `order_status` is a deterministic stand-in until CUE-88 implements it; it
+    is wired now because a `Command` destination that does not exist fails at
+    compile time, so the route and its node must land together.
 
     The graph is typed against `CueContext`, which carries the request-scoped
     handles nodes need but must never checkpoint - the database session above
@@ -62,11 +74,15 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder: StateGraph[AgentState, CueContext] = StateGraph(
         AgentState, context_schema=CueContext
     )
-    builder.add_node(GUARDRAIL, guardrail_node)
+    builder.add_node(ROUTE_TURN, route_turn)
     builder.add_node(GENERATE_RECIPE, generate_recipe_node)
+    builder.add_node(PARSE_RECIPE_PHOTO, parse_recipe_photo_node)
+    builder.add_node(ORDER_STATUS, order_status_node)
     builder.add_node(REFUSE, refuse_node)
-    builder.add_edge(START, GUARDRAIL)
+    builder.add_edge(START, ROUTE_TURN)
     builder.add_edge(GENERATE_RECIPE, END)
+    builder.add_edge(PARSE_RECIPE_PHOTO, END)
+    builder.add_edge(ORDER_STATUS, END)
     builder.add_edge(REFUSE, END)
     return builder
 
