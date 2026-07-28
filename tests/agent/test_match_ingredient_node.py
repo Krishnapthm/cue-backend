@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent import graph as graph_module
 from app.agent.context import CueContext
 from app.agent.nodes import match_ingredient as node_module
+from app.agent.nodes.cart import COMPOSE_CART
 from app.agent.nodes.match_ingredient import (
     MATCH_INGREDIENT,
     MatchTask,
@@ -101,8 +102,12 @@ def _harness() -> Any:
         input_schema=MatchTask,
         retry_policy=graph_module.NETWORK_RETRY,
     )
-    builder.add_conditional_edges(START, fan_out, [MATCH_INGREDIENT, END])
-    builder.add_edge(MATCH_INGREDIENT, END)
+    # Stands in for `compose_cart`, which has its own tests: the fan-out only
+    # needs somewhere real to route to.
+    builder.add_node(COMPOSE_CART, lambda _state: {})
+    builder.add_conditional_edges(START, fan_out, [MATCH_INGREDIENT, COMPOSE_CART])
+    builder.add_edge(MATCH_INGREDIENT, COMPOSE_CART)
+    builder.add_edge(COMPOSE_CART, END)
     return builder.compile()
 
 
@@ -174,9 +179,14 @@ def test_fan_out_sends_one_worker_per_needed_ingredient() -> None:
     assert [send.arg["ingredient"].name for send in sends] == ["paneer", "butter"]
 
 
-def test_fan_out_ends_the_turn_when_the_user_already_has_everything() -> None:
-    """An empty `Send` list would strand the turn with no next node at all."""
-    assert fan_out(_state([SALT], have={"salt"})) == END
+def test_fan_out_skips_to_compose_when_the_user_already_has_everything() -> None:
+    """An empty `Send` list would strand the turn with no next node at all.
+
+    Composing an empty plan is the right ending rather than a special case: it
+    supersedes whatever plan was live and never calls `update_cart`, so the
+    user's real Swiggy cart is left exactly as they left it.
+    """
+    assert fan_out(_state([SALT], have={"salt"})) == COMPOSE_CART
 
 
 def test_the_users_marks_beat_the_stale_pantry_seeded_status() -> None:
@@ -587,7 +597,10 @@ def test_the_real_graph_fans_out_of_confirm_checklist() -> None:
     # The fan-out is conditional. A static edge alongside it would run both
     # branches - the same trap `route_turn` documents.
     assert all(edge.conditional for edge in out_of_checklist)
-    assert {edge.target for edge in out_of_checklist} == {MATCH_INGREDIENT, END}
+    assert {edge.target for edge in out_of_checklist} == {
+        MATCH_INGREDIENT,
+        COMPOSE_CART,
+    }
 
 
 def test_the_worker_carries_the_network_retry_policy() -> None:

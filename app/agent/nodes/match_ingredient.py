@@ -26,11 +26,11 @@ from decimal import Decimal
 from typing import TypedDict
 
 from langgraph.config import get_stream_writer
-from langgraph.graph import END
 from langgraph.runtime import Runtime
 from langgraph.types import Send
 
 from app.agent.context import CueContext
+from app.agent.nodes.cart import COMPOSE_CART
 from app.agent.schemas import IngredientStatus, MatchResult, NormalizedIngredient
 from app.agent.state import AgentState
 from app.cart import service as cart_service
@@ -110,6 +110,7 @@ def _unavailable(row: NormalizedIngredient, reason: str) -> MatchResult:
         ingredient_name=row.name,
         status=MatchStatus.UNAVAILABLE,
         substitution_reason=reason[:1000],
+        selection_reason=reason[:1000],
     )
 
 
@@ -121,6 +122,7 @@ def _from_selected(row: NormalizedIngredient, selected: SelectedVariant) -> Matc
     matched row is not a swap and has nothing to explain.
     """
     substituted = selected.match_status is MatchStatus.SUBSTITUTED
+    reason = selected.selection_reason[:1000]
     return MatchResult(
         ingredient_name=row.name,
         status=selected.match_status,
@@ -129,7 +131,8 @@ def _from_selected(row: NormalizedIngredient, selected: SelectedVariant) -> Matc
         pack_size=selected.pack_size,
         unit_price=selected.unit_price,
         quantity=selected.quantity,
-        substitution_reason=selected.selection_reason[:1000] if substituted else None,
+        substitution_reason=reason if substituted else None,
+        selection_reason=reason,
     )
 
 
@@ -177,6 +180,7 @@ async def _resolve(context: CueContext, row: NormalizedIngredient) -> MatchResul
         unit_price=substitute.unit_price,
         quantity=substitute.quantity,
         substitution_reason=substitute.reason,
+        selection_reason=substitute.reason,
     )
 
 
@@ -192,9 +196,12 @@ def fan_out(state: AgentState) -> list[Send] | str:
         state: The graph state, after the checklist has been answered.
 
     Returns:
-        One `Send` per NEED ingredient, or `END` when there are none - a user
-        who already owns everything has nothing to buy, and an empty `Send`
-        list would strand the turn with no next node at all.
+        One `Send` per NEED ingredient, or `COMPOSE_CART` when there are
+        none. An empty `Send` list would strand the turn with no next node at
+        all, and a user who already owns everything still gets a turn that
+        ends properly: composing an empty plan supersedes whatever plan was
+        live, and never calls `update_cart`, so their real Swiggy cart is left
+        exactly as they left it.
     """
     rows = needed_ingredients(state)
     if not rows:
@@ -202,7 +209,7 @@ def fan_out(state: AgentState) -> list[Send] | str:
             "Nothing to buy for session %s: every ingredient is already owned.",
             state["session_id"],
         )
-        return END
+        return COMPOSE_CART
     return [Send(MATCH_INGREDIENT, MatchTask(ingredient=row)) for row in rows]
 
 

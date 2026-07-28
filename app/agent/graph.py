@@ -11,6 +11,12 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import RetryPolicy
 
 from app.agent.context import CueContext
+from app.agent.nodes.cart import (
+    COMPOSE_CART,
+    REPORT_CART,
+    compose_cart_node,
+    report_cart_node,
+)
 from app.agent.nodes.confirm_checklist import confirm_checklist
 from app.agent.nodes.guardrail import refuse_node
 from app.agent.nodes.match_ingredient import (
@@ -94,6 +100,12 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
                  |                                    match_ingredient  (xN)
                  |                                            |
                  |                                            v
+                 |                                      compose_cart
+                 |                                            |
+                 |                                            v
+                 |                                       report_cart
+                 |                                            |
+                 |                                            v
                  |                                           END
                  +-------(order_status)-> order_status ------> END
                  |
@@ -168,8 +180,14 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_edge(PARSE_RECIPE_PHOTO, GENERATE_RECIPE)
     builder.add_edge(GENERATE_RECIPE, NORMALIZE_INGREDIENTS)
     builder.add_edge(NORMALIZE_INGREDIENTS, CONFIRM_CHECKLIST)
-    builder.add_conditional_edges(CONFIRM_CHECKLIST, fan_out, [MATCH_INGREDIENT, END])
-    builder.add_edge(MATCH_INGREDIENT, END)
+    builder.add_node(COMPOSE_CART, compose_cart_node)
+    builder.add_node(REPORT_CART, report_cart_node)
+    builder.add_conditional_edges(
+        CONFIRM_CHECKLIST, fan_out, [MATCH_INGREDIENT, COMPOSE_CART]
+    )
+    builder.add_edge(MATCH_INGREDIENT, COMPOSE_CART)
+    builder.add_edge(COMPOSE_CART, REPORT_CART)
+    builder.add_edge(REPORT_CART, END)
     builder.add_edge(ORDER_STATUS, END)
     builder.add_edge(REFUSE, END)
     return builder

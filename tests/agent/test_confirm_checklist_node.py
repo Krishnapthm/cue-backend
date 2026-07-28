@@ -157,14 +157,18 @@ class _StubChatModel:
 def stub_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub the router and recipe models, the pantry read, and Swiggy search.
 
-    Search is stubbed because a *resumed* turn no longer stops at
-    `confirm_checklist`: it carries on into the ingredient fan-out (CUE-91),
-    which reaches off-box. Answering with no candidates keeps these tests about
-    pause and resume - every ingredient resolves to an `unavailable` row, which
-    needs no session and no network.
+    Search and cart composition are stubbed because a *resumed* turn no longer
+    stops at `confirm_checklist`: it carries on into the ingredient fan-out
+    (CUE-91) and then into `compose_cart` (CUE-92), both of which reach off-box
+    and the second of which writes. Answering with no candidates and a canned
+    compose result keeps these tests about pause and resume.
     """
+    from decimal import Decimal
+
     from app.agent.nodes import recipe as recipe_module
     from app.agent.nodes import route as route_module
+    from app.cart import service as cart_service
+    from app.cart.schemas import ComposeCartResult
     from app.instamart import service as instamart_service
     from app.instamart.schemas import Product
     from app.pantry import service as pantry_service
@@ -201,6 +205,17 @@ def stub_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     # Patched on the service module itself, so `propose_substitute`'s own
     # search is answered by the same stub rather than reaching for a session.
     monkeypatch.setattr(instamart_service, "search_products", _no_candidates)
+
+    async def _compose(*_args: object, **_kwargs: object) -> ComposeCartResult:
+        return ComposeCartResult(
+            plan_id=1,
+            subtotal=Decimal("0"),
+            minimum_order_value=Decimal("99"),
+            below_minimum=True,
+            shortfall=Decimal("99"),
+        )
+
+    monkeypatch.setattr(cart_service, "compose_cart", _compose)
 
 
 def _turn(thread_id: str) -> AgentState:

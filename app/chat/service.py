@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.context import CueContext
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.graph import PROSE_NODES, CueGraph, thread_config
-from app.agent.schemas import ChecklistDecision, MatchResult
+from app.agent.schemas import CartReport, ChecklistDecision, MatchResult
 from app.agent.state import AgentState
 from app.chat.constants import ADDRESS_REQUIRED_MESSAGE
 from app.chat.exceptions import (
@@ -75,6 +75,22 @@ def _interrupt_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         return None
     payload = getattr(interrupts[0], "value", None)
     return payload if isinstance(payload, dict) else None
+
+
+def _cart_report(value: Any) -> CartReport | None:
+    """Read a `cart_report` state value, whatever shape it comes back in.
+
+    Validated rather than cast: state that has been through the checkpointer
+    comes back as plain JSON, while state straight off an `ainvoke` is still
+    the model instance. Both are accepted; anything else is not a report.
+    """
+    if value is None:
+        return None
+    try:
+        return CartReport.model_validate(value)
+    except ValidationError:
+        logger.warning("Ignoring an unreadable cart_report on the turn's state.")
+        return None
 
 
 async def create_session(session: AsyncSession, user_id: int) -> ChatSession:
@@ -338,6 +354,32 @@ async def _persist_checklist(
     )
 
 
+async def _persist_cart_report(
+    session: AsyncSession,
+    user_id: int,
+    session_id: uuid.UUID,
+    report: CartReport,
+) -> ChatMessage:
+    """Append the finished cart to the transcript as a `CART_READY` message.
+
+    Written here rather than in `report_cart` for the same reason the checklist
+    is: every transcript write belongs to one owner. `content` carries the
+    node's summary line so a client that renders nothing but text still says
+    something useful; `payload` carries the card.
+    """
+    return await append_message(
+        session,
+        user_id,
+        session_id,
+        CreateMessageRequest(
+            role=MessageRole.ASSISTANT,
+            kind=MessageKind.CART_READY,
+            content=report.summary,
+            payload=report.model_dump(mode="json"),
+        ),
+    )
+
+
 def _checklist_answer(request: CreateMessageRequest) -> ChecklistDecision | None:
     """Read an inbound message as an answer to the checklist, if it is one.
 
@@ -475,10 +517,17 @@ async def run_turn(
         )
         return user_message, checklist
 
+    report = _cart_report(result.get("cart_report"))
+    if report is not None:
+        # A cart turn ends on its card, not on prose. This is also the only
+        # thing a resumed turn produces, which is why it is checked first.
+        cart_message = await _persist_cart_report(session, user_id, session_id, report)
+        return user_message, cart_message
+
     if answer is not None:
-        # The resumed run ends at `confirm_checklist` for now, and everything in
-        # `result["messages"]` is replayed history - persisting the "last" reply
-        # here would duplicate the recipe bubble from the turn that paused.
+        # A resume that produced no cart has nothing to say: everything in
+        # `result["messages"]` is replayed history, so persisting the "last"
+        # reply here would duplicate the recipe bubble from the turn that paused.
         return user_message, None
 
     reply = _reply_text(result["messages"])
@@ -633,6 +682,7 @@ async def stream_turn(
 
     replies: list[BaseMessage] = []
     interrupt_payload: dict[str, Any] | None = None
+    report: CartReport | None = None
 
     try:
         async for stream_mode, chunk in graph.astream(
@@ -652,6 +702,10 @@ async def stream_turn(
                     updates = cast("dict[str, Any]", chunk)
                     for node_update in updates.values():
                         replies.extend(_messages_in(node_update))
+                        if isinstance(node_update, dict):
+                            report = (
+                                _cart_report(node_update.get("cart_report")) or report
+                            )
                     for update_event in _updates_events(updates):
                         if isinstance(update_event, InterruptEvent) and isinstance(
                             update_event.payload, dict
@@ -675,6 +729,14 @@ async def stream_turn(
         # cold start - the SSE event alone would be lost with the connection.
         await _persist_checklist(session, user_id, session_id, interrupt_payload)
         yield DoneEvent(interrupted=True)
+        return
+
+    if report is not None:
+        # A cart turn ends on its card. Persisted for the same reason the
+        # checklist is: the SSE event alone dies with the connection, and the
+        # transcript has to still render the cart on a cold start.
+        cart_message = await _persist_cart_report(session, user_id, session_id, report)
+        yield DoneEvent(reply=report.summary, message_id=cart_message.id)
         return
 
     reply = _reply_text(replies)

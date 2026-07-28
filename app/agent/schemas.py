@@ -106,6 +106,16 @@ class MatchResult(BaseModel):
     changed rather than silently showing a different product. It is
     deterministic, service-generated text - unlike `GuardrailDecision.reason`
     it is safe to render. It is `None` on a plain `MATCHED` row.
+
+    `selection_reason` is the *full* reason the selection was made, including
+    the pack-size arithmetic CUE-15 works out ("2 pack(s) leaves 100 g over the
+    amount needed"). It is present on every row, and it is what
+    `compose_cart` persists onto `cart_plan_item.selection_reason` - the audit
+    trail for why the cart holds what it holds. `substitution_reason` is the
+    subset of it that is worth putting in front of the user, which is why the
+    two are separate rather than one field doing both jobs. Capped at 1000 to
+    match that column's CHECK constraint, so it cannot violate it by
+    construction.
     """
 
     ingredient_name: str
@@ -116,6 +126,58 @@ class MatchResult(BaseModel):
     unit_price: Decimal | None = None
     quantity: int | None = None
     substitution_reason: str | None = Field(default=None, max_length=1000)
+    selection_reason: str | None = Field(default=None, max_length=1000)
+
+
+class CartReportItem(BaseModel):
+    """One line of the cart-ready card (CUE-92).
+
+    `in_cart` is read back off Swiggy's own `get_cart`, not inferred from what
+    we asked for. Swiggy does not always fail a write it cannot fully honour -
+    it can answer `success: true` and quietly omit an out-of-stock line - so a
+    line we sent that is not in the cart Swiggy returned is a real outcome the
+    user has to be shown, not a rendering detail.
+
+    `quantity` and `line_total` come from the cart line when there is one, and
+    fall back to the compose-time snapshot only for rows that never made it
+    into the cart. `unit_price` is always the snapshot: Swiggy reports a line
+    total, and dividing it back out would invent precision we do not have.
+    """
+
+    ingredient_name: str
+    status: MatchStatus
+    in_cart: bool
+    product_name: str | None = None
+    pack_size: str | None = None
+    quantity: int | None = None
+    unit_price: Decimal | None = None
+    line_total: Decimal | None = None
+    substitution_reason: str | None = None
+
+
+class CartReport(BaseModel):
+    """The terminal message of a cart turn: what is in the cart, and what is not.
+
+    Persisted as the payload of a `MessageKind.CART_READY` message, so it has
+    to stay JSON-serializable and self-contained - the transcript renders it
+    again on a cold start, long after the turn's state is gone.
+
+    `below_minimum` is reported, never chased. There is no `suggest_addons`
+    node and no retry loop: the graph stays acyclic, and topping up an order is
+    the user's call to make on the cart screen, not the agent's to make for
+    them.
+    """
+
+    plan_id: int
+    summary: str
+    below_minimum: bool
+    subtotal: Decimal
+    minimum_order_value: Decimal
+    shortfall: Decimal
+    # Swiggy's own total for the cart it read back, when it gave one. `None`
+    # below the minimum (nothing was pushed) or when Swiggy omitted it.
+    cart_total: Decimal | None = None
+    items: list[CartReportItem]
 
 
 class TurnFailureKind(StrEnum):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import httpx
 import pytest_asyncio
@@ -730,3 +731,73 @@ async def test_a_resumed_turn_persists_no_duplicate_reply(
     assert response.json()["assistant_message"] is None
     transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
     assert [m["kind"] for m in transcript["messages"]] == ["checklist"]
+
+
+#: A cart the way `report_cart` renders one (CUE-92).
+CART_REPORT: dict[str, Any] = {
+    "plan_id": 7,
+    "summary": "Cart ready: 1 item, \u20b9180.00.",
+    "below_minimum": False,
+    "subtotal": "180.00",
+    "minimum_order_value": "99.00",
+    "shortfall": "0",
+    "cart_total": "180.00",
+    "items": [
+        {
+            "ingredient_name": "paneer",
+            "status": "matched",
+            "in_cart": True,
+            "product_name": "Amul Paneer",
+            "pack_size": "200 g",
+            "quantity": 2,
+            "unit_price": "90.00",
+            "line_total": "180.00",
+            "substitution_reason": None,
+        }
+    ],
+}
+
+
+async def test_a_turn_that_ends_in_a_cart_persists_it_as_cart_ready(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # A cart turn ends on its card, not on prose. `content` carries the summary
+    # so a text-only client still says something useful; `payload` is the card.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.cart_report = CART_REPORT
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    assert response.status_code == 201
+    assistant = response.json()["assistant_message"]
+    assert assistant["kind"] == "cart_ready"
+    assert assistant["content"] == CART_REPORT["summary"]
+    assert assistant["payload"]["items"][0]["ingredient_name"] == "paneer"
+
+
+async def test_a_resumed_turn_ends_on_the_cart_it_produced(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The resume is the turn that actually buys things, so unlike the
+    # reply-less resume above it does owe the user a message.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.interrupts = (FakeInterrupt(id="int-1", value={"ui": "checklist"}),)
+    fake_agent.cart_report = CART_REPORT
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "kind": "checklist", "payload": {"have": ["salt"]}},
+    )
+
+    assert response.json()["assistant_message"]["kind"] == "cart_ready"
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == ["checklist", "cart_ready"]

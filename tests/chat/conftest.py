@@ -100,6 +100,11 @@ class FakeAgentGraph:
     #: When set, `ainvoke` reports a pause carrying this payload instead of
     #: running the turn to a reply.
     interrupt_value: dict[str, Any] | None = None
+    #: When set, the turn ends on a cart instead of on prose - what a real turn
+    #: does once the fan-out and `compose_cart` have run (CUE-91/92). Checked
+    #: before the resume branch, because a resumed turn is exactly the one that
+    #: produces a cart.
+    cart_report: dict[str, Any] | None = None
 
     async def ainvoke(
         self,
@@ -118,6 +123,12 @@ class FakeAgentGraph:
                     FakeInterrupt(id="int-1", value=self.interrupt_value)
                 ],
             }
+        if self.cart_report is not None:
+            report: dict[str, Any] = {"messages": [], "cart_report": self.cart_report}
+            if isinstance(state, Command):
+                resumed = cast("dict[str, Any]", state.resume)
+                report["have_marks"] = set(resumed["have"])
+            return report
         if isinstance(state, Command):
             # A resume carries no state of its own; the checkpointer has it.
             resume = cast("dict[str, Any]", state.resume)

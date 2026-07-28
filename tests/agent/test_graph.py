@@ -245,7 +245,13 @@ def test_the_recipe_branch_runs_through_the_checklist() -> None:
     edges = {(e.source, e.target) for e in drawable.edges}
     assert ("generate_recipe", "normalize_ingredients") in edges
     assert ("normalize_ingredients", "confirm_checklist") in edges
-    assert ("confirm_checklist", "__end__") in edges
+    # The checklist no longer ends the turn: answering it fans out into the
+    # cart path, which is what actually closes it (CUE-91/92).
+    assert ("confirm_checklist", "match_ingredient") in edges
+    assert ("match_ingredient", "compose_cart") in edges
+    assert ("compose_cart", "report_cart") in edges
+    assert ("report_cart", "__end__") in edges
+    assert ("confirm_checklist", "__end__") not in edges
     assert ("generate_recipe", "__end__") not in edges
     assert ("normalize_ingredients", "__end__") not in edges
 
