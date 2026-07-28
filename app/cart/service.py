@@ -119,6 +119,8 @@ def select_variant(
         product_name=product.name,
         pack_size=variant.pack_size,
         unit_price=variant.price,
+        image_url=variant.image_url,
+        rating=variant.rating,
         quantity=pack_count,
         overage=overage,
         selection_reason=reason,

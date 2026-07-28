@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.cart.schemas import MatchStatus
+from app.instamart.schemas import ProductRating
 
 
 class RecipeIngredient(BaseModel):
@@ -124,6 +125,8 @@ class MatchResult(BaseModel):
     product_name: str | None = None
     pack_size: str | None = None
     unit_price: Decimal | None = None
+    image_url: str | None = None
+    rating: ProductRating | None = None
     quantity: int | None = None
     substitution_reason: str | None = Field(default=None, max_length=1000)
     selection_reason: str | None = Field(default=None, max_length=1000)
@@ -151,6 +154,8 @@ class CartReportItem(BaseModel):
     pack_size: str | None = None
     quantity: int | None = None
     unit_price: Decimal | None = None
+    image_url: str | None = None
+    rating: ProductRating | None = None
     line_total: Decimal | None = None
     substitution_reason: str | None = None
 

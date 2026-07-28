@@ -95,6 +95,22 @@ class CreateAddressRequest(BaseModel):
     receiver_phone: str | None = Field(default=None, alias="receiverPhone")
 
 
+class ProductRating(BaseModel):
+    """A variation's rating as supplied by Instamart search results.
+
+    Swiggy sends the rating value as a numeric string and the count as an
+    already-rounded display value such as ``"51.5k"``. The value is safe to
+    parse to a float. The count is deliberately retained as ``count_display``:
+    the source has discarded the exact integer, so treating it as one here
+    would fabricate precision the client cannot recover.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    value: float
+    count_display: str = Field(alias="count", serialization_alias="countDisplay")
+
+
 class ProductVariant(BaseModel):
     """One purchasable variant of a search_products candidate (R4.1, R4.2).
 
@@ -120,6 +136,11 @@ class ProductVariant(BaseModel):
         default=True,
         validation_alias=AliasChoices("isInStockAndAvailable", "inStock", "in_stock"),
     )
+    # Both fields were observed on individual `variations`, which makes their
+    # association with the cart-addressable spin_id explicit. Rating is null
+    # for some otherwise purchasable variations.
+    image_url: str | None = Field(default=None, alias="imageUrl")
+    rating: ProductRating | None = None
 
     @field_validator("price", mode="before")
     @classmethod
@@ -182,6 +203,8 @@ class CartLineItem(BaseModel):
     quantity: int
     price: Decimal | None = None
     product_name: str | None = Field(default=None, alias="productName")
+    image_url: str | None = Field(default=None, alias="imageUrl")
+    rating: ProductRating | None = None
 
 
 class Cart(BaseModel):

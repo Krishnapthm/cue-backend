@@ -43,7 +43,7 @@ from app.instamart.exceptions import (
     InstamartDomainError,
     InstamartTransportError,
 )
-from app.instamart.schemas import Product, ProductVariant
+from app.instamart.schemas import Product, ProductRating, ProductVariant
 from app.matching import substitution as matching_service
 from app.matching.schemas import SubstitutionResult
 from app.models.user import User
@@ -119,6 +119,8 @@ def _product(
     price: str,
     in_stock: bool = True,
     brand: str | None = None,
+    image_url: str | None = None,
+    rating: ProductRating | None = None,
 ) -> Product:
     return Product(
         product_id=f"prod-{spin_id}",
@@ -130,6 +132,8 @@ def _product(
                 pack_size=pack_size,
                 price=Decimal(price),
                 in_stock=in_stock,
+                image_url=image_url,
+                rating=rating,
             )
         ],
     )
@@ -431,7 +435,18 @@ async def test_the_emitted_payload_is_exactly_what_the_sse_layer_parses(
     """
     _stub_search(
         monkeypatch,
-        {"paneer": [_product("Paneer", spin_id="s1", pack_size="250 g", price="90")]},
+        {
+            "paneer": [
+                _product(
+                    "Paneer",
+                    spin_id="s1",
+                    pack_size="250 g",
+                    price="90",
+                    image_url="https://media-assets.swiggy.com/swiggy/image/upload/s1.png",
+                    rating=ProductRating(value=4.5, count_display="51.5k"),
+                )
+            ]
+        },
     )
 
     events = [
@@ -445,6 +460,9 @@ async def test_the_emitted_payload_is_exactly_what_the_sse_layer_parses(
     assert event.ingredient_name == "paneer"
     assert event.status is MatchStatus.MATCHED
     assert event.unit_price == Decimal("90")
+    assert event.image_url is not None
+    assert event.image_url.endswith("s1.png")
+    assert event.rating == ProductRating(value=4.5, count_display="51.5k")
 
 
 # --- failure isolation ------------------------------------------------------

@@ -99,7 +99,14 @@ async def test_get_cart_returns_the_server_cart(
 
     assert response.status_code == 200
     assert response.json()["items"] == [
-        {"spinId": "spin-1", "quantity": 2, "price": "100.00", "productName": None}
+        {
+            "spinId": "spin-1",
+            "quantity": 2,
+            "price": "100.00",
+            "productName": None,
+            "imageUrl": None,
+            "rating": None,
+        }
     ]
 
 
