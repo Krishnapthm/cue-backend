@@ -237,14 +237,17 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
 
 
 def test_the_recipe_branch_runs_through_the_checklist() -> None:
-    # A recipe turn always produces a checklist, so this is a static edge and
-    # `generate_recipe` no longer ends the turn on its own.
+    # A recipe turn always produces a checklist and every checklist is
+    # confirmed, so these are static edges and `generate_recipe` no longer ends
+    # the turn on its own.
     drawable = graph_module.build_graph().compile().get_graph()
 
     edges = {(e.source, e.target) for e in drawable.edges}
     assert ("generate_recipe", "normalize_ingredients") in edges
-    assert ("normalize_ingredients", "__end__") in edges
+    assert ("normalize_ingredients", "confirm_checklist") in edges
+    assert ("confirm_checklist", "__end__") in edges
     assert ("generate_recipe", "__end__") not in edges
+    assert ("normalize_ingredients", "__end__") not in edges
 
 
 def test_there_is_no_static_edge_out_of_the_router() -> None:

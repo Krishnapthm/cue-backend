@@ -295,8 +295,9 @@ async def test_an_interrupt_surfaces_as_its_own_event_with_its_payload(
 async def test_a_paused_turn_persists_no_assistant_reply(
     client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
 ) -> None:
-    # The turn owes the user a decision, not an answer. A half-finished
-    # assistant bubble would claim it was answered.
+    # The turn owes the user a decision, not an answer: no assistant *text*
+    # bubble, which would claim the turn was answered. The checklist itself is
+    # persisted, so the transcript still renders it after a reconnect.
     fake_agent.chunks = [
         ("updates", {"compose_cart": {"messages": [AIMessage(content="partial")]}}),
         ("updates", {"__interrupt__": [FakeInterrupt(id="int-1", value={"q": "?"})]}),
@@ -305,7 +306,9 @@ async def test_a_paused_turn_persists_no_assistant_reply(
     await _stream(client, session_id, "paneer butter masala")
 
     transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
-    assert [m["role"] for m in transcript["messages"]] == ["user"]
+    kinds = [(m["role"], m["kind"]) for m in transcript["messages"]]
+    assert kinds == [("user", "text"), ("assistant", "checklist")]
+    assert transcript["messages"][-1]["payload"] == {"q": "?"}
 
 
 # --- errors mid-stream -----------------------------------------------------

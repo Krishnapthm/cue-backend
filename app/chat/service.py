@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langgraph.types import Command
 from pydantic import ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,10 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.context import CueContext
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.graph import PROSE_NODES, CueGraph, thread_config
-from app.agent.schemas import MatchResult
+from app.agent.schemas import ChecklistDecision, MatchResult
 from app.agent.state import AgentState
 from app.chat.constants import ADDRESS_REQUIRED_MESSAGE
-from app.chat.exceptions import ChatSessionNotFoundError
+from app.chat.exceptions import (
+    ChatSessionNotFoundError,
+    InvalidChecklistAnswerError,
+    NoPendingChecklistError,
+)
 from app.chat.schemas import (
     ChatStreamEvent,
     CreateMessageRequest,
@@ -54,6 +59,22 @@ logger = logging.getLogger(__name__)
 #: rather than imported: `langgraph.constants.INTERRUPT` is private as of
 #: LangGraph v1 and slated for removal, and this is a stable wire-level name.
 INTERRUPT_KEY = "__interrupt__"
+
+
+def _interrupt_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the checklist an `ainvoke` result paused on, if it paused.
+
+    Args:
+        result: What `graph.ainvoke` returned for the turn.
+
+    Returns:
+        The first interrupt's payload, or `None` when the turn ran to the end.
+    """
+    interrupts = result.get(INTERRUPT_KEY)
+    if not interrupts:
+        return None
+    payload = getattr(interrupts[0], "value", None)
+    return payload if isinstance(payload, dict) else None
 
 
 async def create_session(session: AsyncSession, user_id: int) -> ChatSession:
@@ -295,6 +316,85 @@ async def _persist_reply(
     )
 
 
+async def _persist_checklist(
+    session: AsyncSession,
+    user_id: int,
+    session_id: uuid.UUID,
+    payload: dict[str, Any],
+) -> ChatMessage:
+    """Append the paused turn's checklist to the transcript.
+
+    `MessageKind.CHECKLIST` and `CreateMessageRequest`'s payload requirement for
+    it both already existed - the schema anticipated this - so a pause needs no
+    new message shape, only this write.
+    """
+    return await append_message(
+        session,
+        user_id,
+        session_id,
+        CreateMessageRequest(
+            role=MessageRole.ASSISTANT, kind=MessageKind.CHECKLIST, payload=payload
+        ),
+    )
+
+
+def _checklist_answer(request: CreateMessageRequest) -> ChecklistDecision | None:
+    """Read an inbound message as an answer to the checklist, if it is one.
+
+    A user `checklist` message is the resume value of `confirm_checklist`. The
+    same `kind` also carries the *question* when the assistant persists it, which
+    is why this is decided here on `role` and context rather than by validating
+    the payload in `CreateMessageRequest`: one kind, two directions, two shapes.
+
+    Args:
+        request: The inbound message.
+
+    Returns:
+        The decision, or `None` when this message is not a checklist answer.
+
+    Raises:
+        InvalidChecklistAnswerError: It is a user checklist message, but its
+            payload is not a readable `{"have": [...]}`.
+    """
+    if (
+        request.role is not MessageRole.USER
+        or request.kind is not MessageKind.CHECKLIST
+    ):
+        return None
+    try:
+        return ChecklistDecision.model_validate(request.payload)
+    except ValidationError as exc:
+        raise InvalidChecklistAnswerError from exc
+
+
+async def _resume_input(
+    graph: CueGraph, session_id: uuid.UUID, answer: ChecklistDecision
+) -> Command[Any]:
+    """Build the resume input for a session that is actually paused.
+
+    The pending interrupt is read from the checkpointer rather than tracked in a
+    column of our own: the checkpointer is already the source of truth, and a
+    second one would drift. It is the same read the `/state` endpoint does.
+
+    Args:
+        graph: The compiled agent graph for this request.
+        session_id: The session being resumed; its `str()` is the `thread_id`.
+        answer: The user's checklist decision.
+
+    Returns:
+        `Command(resume=...)` - never a plain state dict, which would not error
+        but would start a fresh run and leave the session looking stuck.
+
+    Raises:
+        NoPendingChecklistError: Nothing is paused on this thread, so there is
+            no interrupt for this answer to resume.
+    """
+    state = await pending_interrupt(graph, session_id)
+    if state.pending_interrupt is None:
+        raise NoPendingChecklistError
+    return Command(resume=answer.model_dump())
+
+
 async def run_turn(
     session: AsyncSession,
     graph: CueGraph,
@@ -342,8 +442,9 @@ async def run_turn(
             user's message stays persisted; the global handler maps this to
             502.
     """
+    answer = _checklist_answer(request)
     user_message = await append_message(session, user_id, session_id, request)
-    if not _runs_the_agent(request):
+    if answer is None and not _runs_the_agent(request):
         return user_message, None
 
     context = await _turn_context(session, user_id, session_id)
@@ -353,11 +454,32 @@ async def run_turn(
         )
         return user_message, prompt
 
+    agent_input: Command[Any] | AgentState = (
+        await _resume_input(graph, session_id, answer)
+        if answer is not None
+        else _turn_state(user_id, session_id, request)
+    )
     result = await graph.ainvoke(
-        _turn_state(user_id, session_id, request),
+        agent_input,
+        # The same `thread_config` on both calls: pause and resume must share a
+        # `thread_id` or the resume silently becomes a new conversation.
         thread_config(str(session_id)),
         context=context,
     )
+
+    interrupt_payload = _interrupt_payload(result)
+    if interrupt_payload is not None:
+        # A paused turn owes the user a decision, not a reply.
+        checklist = await _persist_checklist(
+            session, user_id, session_id, interrupt_payload
+        )
+        return user_message, checklist
+
+    if answer is not None:
+        # The resumed run ends at `confirm_checklist` for now, and everything in
+        # `result["messages"]` is replayed history - persisting the "last" reply
+        # here would duplicate the recipe bubble from the turn that paused.
+        return user_message, None
 
     reply = _reply_text(result["messages"])
     if reply is None:
@@ -489,8 +611,9 @@ async def stream_turn(
             owned by `user_id`. Raised before anything is yielded, so the
             caller can still answer with a 404.
     """
+    answer = _checklist_answer(request)
     await append_message(session, user_id, session_id, request)
-    if not _runs_the_agent(request):
+    if answer is None and not _runs_the_agent(request):
         yield DoneEvent()
         return
 
@@ -502,12 +625,18 @@ async def stream_turn(
         yield DoneEvent(reply=ADDRESS_REQUIRED_MESSAGE, message_id=prompt.id)
         return
 
+    agent_input: Command[Any] | AgentState = (
+        await _resume_input(graph, session_id, answer)
+        if answer is not None
+        else _turn_state(user_id, session_id, request)
+    )
+
     replies: list[BaseMessage] = []
-    interrupted = False
+    interrupt_payload: dict[str, Any] | None = None
 
     try:
         async for stream_mode, chunk in graph.astream(
-            _turn_state(user_id, session_id, request),
+            agent_input,
             thread_config(str(session_id)),
             context=context,
             stream_mode=["messages", "custom", "updates"],
@@ -524,9 +653,10 @@ async def stream_turn(
                     for node_update in updates.values():
                         replies.extend(_messages_in(node_update))
                     for update_event in _updates_events(updates):
-                        interrupted = interrupted or isinstance(
-                            update_event, InterruptEvent
-                        )
+                        if isinstance(update_event, InterruptEvent) and isinstance(
+                            update_event.payload, dict
+                        ):
+                            interrupt_payload = update_event.payload
                         yield update_event
     except AppError as exc:
         error_event = _error_event(exc)
@@ -539,10 +669,11 @@ async def stream_turn(
         yield DoneEvent()
         return
 
-    if interrupted:
-        # A paused turn owes the user a decision, not a reply. Persisting a
-        # half-finished assistant bubble here would leave the transcript
-        # claiming the turn was answered.
+    if interrupt_payload is not None:
+        # A paused turn owes the user a decision, not a reply. The checklist is
+        # persisted so the transcript still renders it after a reconnect or a
+        # cold start - the SSE event alone would be lost with the connection.
+        await _persist_checklist(session, user_id, session_id, interrupt_payload)
         yield DoneEvent(interrupted=True)
         return
 

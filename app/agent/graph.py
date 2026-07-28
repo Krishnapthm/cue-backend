@@ -11,6 +11,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import RetryPolicy
 
 from app.agent.context import CueContext
+from app.agent.nodes.confirm_checklist import confirm_checklist
 from app.agent.nodes.guardrail import refuse_node
 from app.agent.nodes.normalize import normalize_ingredients_node
 from app.agent.nodes.order_status import order_status_node
@@ -31,6 +32,7 @@ GENERATE_RECIPE = "generate_recipe"
 PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
 NORMALIZE_INGREDIENTS = "normalize_ingredients"
+CONFIRM_CHECKLIST = "confirm_checklist"
 REFUSE = "refuse"
 
 #: Nodes whose model output is prose meant for the user, and whose tokens may
@@ -66,6 +68,9 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
                  |                                    normalize_ingredients
                  |                                            |
                  |                                            v
+                 |                                    confirm_checklist  (pauses)
+                 |                                            |
+                 |                                            v
                  |                                           END
                  +-------(order_status)-> order_status ------> END
                  |
@@ -81,10 +86,14 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     turn `generate_recipe` renders the already-parsed recipe rather than
     generating a second one - see `_render_parsed_photo`.
 
-    `generate_recipe -> normalize_ingredients` is a static edge: there is no
-    routing decision to make, every recipe turn produces a checklist. The
-    checklist is where `confirm_checklist` (CUE-90) will interrupt; until then
-    the branch ends there.
+    `generate_recipe -> normalize_ingredients -> confirm_checklist` are static
+    edges: there is no routing decision to make, every recipe turn produces a
+    checklist and every checklist is confirmed.
+
+    `confirm_checklist` is the graph's **only** interrupt, so a compiled graph
+    without a checkpointer can run every branch except that pause. Checkout left
+    the graph entirely (CUE-80), which is why there is no second one - and why
+    no non-idempotent mutation sits behind a pause at all.
 
     `parse_recipe_photo` and `order_status` both reach off-box and carry
     `NETWORK_RETRY`; see the note there.
@@ -118,11 +127,13 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     )
     builder.add_node(ORDER_STATUS, order_status_node, retry_policy=NETWORK_RETRY)
     builder.add_node(NORMALIZE_INGREDIENTS, normalize_ingredients_node)
+    builder.add_node(CONFIRM_CHECKLIST, confirm_checklist)
     builder.add_node(REFUSE, refuse_node)
     builder.add_edge(START, ROUTE_TURN)
     builder.add_edge(PARSE_RECIPE_PHOTO, GENERATE_RECIPE)
     builder.add_edge(GENERATE_RECIPE, NORMALIZE_INGREDIENTS)
-    builder.add_edge(NORMALIZE_INGREDIENTS, END)
+    builder.add_edge(NORMALIZE_INGREDIENTS, CONFIRM_CHECKLIST)
+    builder.add_edge(CONFIRM_CHECKLIST, END)
     builder.add_edge(ORDER_STATUS, END)
     builder.add_edge(REFUSE, END)
     return builder
