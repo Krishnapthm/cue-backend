@@ -65,10 +65,15 @@ def postgres_url() -> Generator[str]:
     """
     with PostgresContainer("postgres:17-alpine", driver="asyncpg") as container:
         url = container.get_connection_url()
+        env = {**os.environ, "DATABASE_URL": url}
+        subprocess.run(["uv", "run", "alembic", "upgrade", "head"], check=True, env=env)
+        # The checkpointer's own tables are a *deployment* step, not something
+        # the app does at startup (CUE-93), so the suite provisions them the
+        # same way a deploy does - by running the script, right after Alembic.
         subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "head"],
+            ["uv", "run", "python", "scripts/setup_checkpointer.py"],
             check=True,
-            env={**os.environ, "DATABASE_URL": url},
+            env=env,
         )
         yield url
 

@@ -7,6 +7,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 from app.agent.schemas import (
+    CartReport,
     GeneratedRecipe,
     GuardrailDecision,
     MatchResult,
@@ -82,6 +83,12 @@ class AgentState(TypedDict):
     the `cart_plan` row it recorded, and the subtotal/minimum-order verdict
     the report is rendered from.
 
+    `cart_report` is `report_cart`'s rendering of that outcome - the card the
+    turn ends on. The node builds it; `chat.service` is what persists it as a
+    `CART_READY` message, for the same reason the checklist pause works that
+    way: every transcript write belongs to one owner, and a node that reached
+    into `chat.service` would close an import cycle through `agent.graph`.
+
     `failure` records a turn that ended without its intended output in a form
     the client can render and act on (reconnect Swiggy, retry). Failures that
     are *our* bugs still raise and surface as 5xx; this field is for the ones
@@ -104,4 +111,5 @@ class AgentState(TypedDict):
     matches: Annotated[NotRequired[list[MatchResult]], operator.add]
     cart_plan_id: NotRequired[int | None]
     compose_result: NotRequired[ComposeCartResult | None]
+    cart_report: NotRequired[CartReport | None]
     failure: NotRequired[TurnFailure | None]

@@ -454,3 +454,30 @@ async def test_state_404s_for_another_users_session(
     response = await client.get(f"/chat/sessions/{other_session.id}/state")
 
     assert response.status_code == 404
+
+
+async def test_a_streamed_cart_turn_ends_on_the_card(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    """The card is persisted, not just streamed.
+
+    The SSE event dies with the connection; the transcript has to still render
+    the cart on a cold start the next day.
+    """
+    from tests.chat.test_router import CART_REPORT
+
+    fake_agent.chunks = [
+        ("updates", {"compose_cart": {"cart_plan_id": 7}}),
+        ("updates", {"report_cart": {"cart_report": CART_REPORT}}),
+    ]
+
+    response = await _stream(client, session_id, "paneer butter masala")
+
+    frames = _frames(response.text)
+    (done,) = [payload for name, payload in frames if name == "done"]
+    assert done["reply"] == CART_REPORT["summary"]
+    assert done["interrupted"] is False
+
+    transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == ["text", "cart_ready"]
+    assert transcript["messages"][1]["payload"]["plan_id"] == 7

@@ -20,6 +20,9 @@ Cue-backend is a uv workspace housing the FastAPI service (cue-api) and LangGrap
 - Single test: `uv run pytest tests/recipes/test_service.py::test_name -v`
 - Lint/format: `uv run ruff check --fix . && uv run ruff format .`
 - Typecheck: `uv run mypy .`
+- Migrate: `uv run alembic upgrade head`
+- Provision the agent checkpointer (deploy step, run once after migrating):
+  `uv run python scripts/setup_checkpointer.py`
 - Build: not applicable (service, not a distributed package)
 
 Run `uv run ruff check . && uv run mypy . && uv run pytest` before committing.

@@ -116,7 +116,14 @@ class SessionSummary(BaseModel):
 
     id: uuid.UUID
     title: str | None
+    selected_address_id: str | None
     updated_at: datetime
+
+
+class UpdateSessionRequest(BaseModel):
+    """A mutable chat-session setting supplied by the client."""
+
+    selected_address_id: str = Field(min_length=1, max_length=100)
 
 
 class SessionDetail(BaseModel):

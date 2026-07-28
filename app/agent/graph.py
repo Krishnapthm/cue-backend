@@ -3,16 +3,33 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import RetryPolicy
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
+from app.agent.config import agent_settings
 from app.agent.context import CueContext
+from app.agent.nodes.cart import (
+    COMPOSE_CART,
+    REPORT_CART,
+    compose_cart_node,
+    report_cart_node,
+)
 from app.agent.nodes.confirm_checklist import confirm_checklist
 from app.agent.nodes.guardrail import refuse_node
+from app.agent.nodes.match_ingredient import (
+    MATCH_INGREDIENT,
+    MatchTask,
+    fan_out,
+    match_ingredient,
+)
 from app.agent.nodes.normalize import normalize_ingredients_node
 from app.agent.nodes.order_status import order_status_node
 from app.agent.nodes.recipe import generate_recipe_node, parse_recipe_photo_node
@@ -48,13 +65,25 @@ REFUSE = "refuse"
 PROSE_NODES: frozenset[str] = frozenset({ORDER_STATUS})
 
 #: Retry policy for the nodes that reach off-box - the recipe photo fetch and
-#: parse, and the order-status lookup. A transient upstream failure is the
-#: system's problem to retry, not the user's problem to read about; anything
-#: that survives three attempts is a real failure and surfaces as one.
+#: parse, the order-status lookup, and each ingredient worker. A transient
+#: upstream failure is the system's problem to retry, not the user's problem to
+#: read about; anything that survives three attempts is a real failure and
+#: surfaces as one.
 #:
-#: Note this is retries of the *whole node*. Both nodes are safe to re-run:
-#: neither writes anything, and `list_orders_throttled`'s floor means a retried
-#: order-status node is served the cached list rather than re-hitting Swiggy.
+#: Note this is retries of the *whole node*. All three are safe to re-run:
+#: none of them writes anything, `list_orders_throttled`'s floor means a
+#: retried order-status node is served the cached list rather than re-hitting
+#: Swiggy, and an ingredient worker only searches and ranks.
+#:
+#: It is worth being explicit about what this policy does *not* do, because
+#: CUE-91 asks for both and they do not compose: a `RetryPolicy` re-raises once
+#: its attempts are exhausted, so it cannot also be the thing that degrades one
+#: worker's failure into an `unavailable` row. `add_node`'s `error_handler`
+#: argument looks like the missing piece but is inert in langgraph 1.2.9 - it
+#: is recorded on the node spec and read by nothing. Per-ingredient isolation
+#: therefore lives in the worker itself, which catches the failures that are
+#: about one ingredient and lets the ones that are about the whole turn
+#: through; see `match_ingredient`.
 NETWORK_RETRY = RetryPolicy(max_attempts=3)
 
 
@@ -69,6 +98,17 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
                  |                                            |
                  |                                            v
                  |                                    confirm_checklist  (pauses)
+                 |                                            |
+                 |                              (Send per NEED ingredient)
+                 |                                            |
+                 |                                            v
+                 |                                    match_ingredient  (xN)
+                 |                                            |
+                 |                                            v
+                 |                                      compose_cart
+                 |                                            |
+                 |                                            v
+                 |                                       report_cart
                  |                                            |
                  |                                            v
                  |                                           END
@@ -95,8 +135,14 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     the graph entirely (CUE-80), which is why there is no second one - and why
     no non-idempotent mutation sits behind a pause at all.
 
-    `parse_recipe_photo` and `order_status` both reach off-box and carry
-    `NETWORK_RETRY`; see the note there.
+    The edge out of `confirm_checklist` is conditional and returns `Send`s, one
+    per ingredient the user still needs, so the workers run concurrently in a
+    single super-step. It is the one place the graph fans out, and it sits
+    *after* the interrupt on purpose: those searches are spent on the user's
+    say-so, so nothing in the fan-out may pause to ask for more.
+
+    `parse_recipe_photo`, `order_status` and `match_ingredient` all reach
+    off-box and carry `NETWORK_RETRY`; see the note there.
 
     There is deliberately **no** static edge out of `route_turn`: it routes
     with a `Command`, which adds a *dynamic* edge, and a static edge
@@ -128,12 +174,25 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_node(ORDER_STATUS, order_status_node, retry_policy=NETWORK_RETRY)
     builder.add_node(NORMALIZE_INGREDIENTS, normalize_ingredients_node)
     builder.add_node(CONFIRM_CHECKLIST, confirm_checklist)
+    builder.add_node(
+        MATCH_INGREDIENT,
+        match_ingredient,
+        input_schema=MatchTask,
+        retry_policy=NETWORK_RETRY,
+    )
     builder.add_node(REFUSE, refuse_node)
     builder.add_edge(START, ROUTE_TURN)
     builder.add_edge(PARSE_RECIPE_PHOTO, GENERATE_RECIPE)
     builder.add_edge(GENERATE_RECIPE, NORMALIZE_INGREDIENTS)
     builder.add_edge(NORMALIZE_INGREDIENTS, CONFIRM_CHECKLIST)
-    builder.add_edge(CONFIRM_CHECKLIST, END)
+    builder.add_node(COMPOSE_CART, compose_cart_node)
+    builder.add_node(REPORT_CART, report_cart_node)
+    builder.add_conditional_edges(
+        CONFIRM_CHECKLIST, fan_out, [MATCH_INGREDIENT, COMPOSE_CART]
+    )
+    builder.add_edge(MATCH_INGREDIENT, COMPOSE_CART)
+    builder.add_edge(COMPOSE_CART, REPORT_CART)
+    builder.add_edge(REPORT_CART, END)
     builder.add_edge(ORDER_STATUS, END)
     builder.add_edge(REFUSE, END)
     return builder
@@ -164,39 +223,102 @@ def thread_config(thread_id: str) -> RunnableConfig:
     return {"configurable": {"thread_id": thread_id}}
 
 
-def _checkpointer_conn_string() -> str:
+def _checkpointer_conn_string(conn_string: str | None = None) -> str:
     """Return a psycopg-compatible DSN for the checkpointer.
 
     `AsyncPostgresSaver` speaks psycopg (psycopg3), not SQLAlchemy's asyncpg
-    driver, so the `+asyncpg` suffix is stripped from the shared
-    `DATABASE_URL`.
+    driver, so the `+asyncpg` suffix is stripped. An override is normalized the
+    same way, so a caller can hand over whichever spelling of the URL it
+    happens to be holding.
+
+    Args:
+        conn_string: Override DSN; defaults to the app database.
+
+    Returns:
+        The DSN psycopg will accept.
     """
-    return str(settings.DATABASE_URL).replace("postgresql+asyncpg", "postgresql")
+    dsn = conn_string or str(settings.DATABASE_URL)
+    return dsn.replace("postgresql+asyncpg", "postgresql")
+
+
+async def setup_checkpointer(conn_string: str | None = None) -> None:
+    """Provision the checkpointer's tables. **A deployment step, not a startup one.**
+
+    This is DDL. It belongs beside `alembic upgrade head` in a deploy, run once
+    against the database, and it deliberately does not run when the app boots:
+    every process doing DDL on every start is a round-trip per boot at best and
+    a migration race at worst. `scripts/setup_checkpointer.py` is the entry
+    point; `open_compiled_graph` assumes the tables already exist.
+
+    Args:
+        conn_string: Override DSN; defaults to the app database.
+    """
+    async with AsyncPostgresSaver.from_conn_string(
+        _checkpointer_conn_string(conn_string)
+    ) as checkpointer:
+        await checkpointer.setup()
 
 
 @asynccontextmanager
 async def open_compiled_graph(
     conn_string: str | None = None,
+    *,
+    min_size: int | None = None,
+    max_size: int | None = None,
 ) -> AsyncIterator[CueGraph]:
-    """Yield the compiled graph wired to a Postgres checkpointer.
+    """Yield one compiled graph, backed by a checkpointer connection *pool*.
 
-    The checkpointer persists state against the same database as the app,
-    keyed by `thread_id = str(chat_session.id)` supplied per-invocation in the
-    run config. Callers use it as an async context manager so the underlying
-    connection is closed on exit:
+    Opened once per process from the FastAPI lifespan (see `app.main`), not
+    once per request. A request-scoped graph recompiled the graph and opened a
+    dedicated connection every call, which was tolerable for short `ainvoke`
+    turns and is not once SSE streams are long-lived: every open stream pinned
+    a connection for its whole duration, and a handful of concurrent users
+    exhausted the pool. Pooled, a connection is borrowed for each checkpoint
+    read or write and returned immediately, so open streams cost nothing while
+    they are idle.
 
     ```python
     async with open_compiled_graph() as graph:
-        await graph.ainvoke(state, {"configurable": {"thread_id": session_id}})
+        await graph.ainvoke(state, thread_config(session_id), context=context)
     ```
+
+    **The compiled graph is shared across concurrent requests, which is fine
+    and intended.** Every per-run input travels in the run config (`thread_id`)
+    or in `CueContext`, both supplied per invocation; nothing request-scoped is
+    captured at compile time. That is exactly why `CueContext` exists - a
+    session closed over by the compiled graph would be shared across users,
+    which is the worst possible version of this bug.
+
+    `setup()` is *not* called here; see `setup_checkpointer`.
 
     Args:
         conn_string: Override DSN (used by tests); defaults to the app database.
+        min_size: Connections kept warm; defaults to the configured setting.
+        max_size: Pool ceiling; defaults to the configured setting.
 
     Yields:
-        The compiled, checkpointed graph.
+        The compiled, checkpointed graph. The pool closes on exit.
     """
-    dsn = conn_string or _checkpointer_conn_string()
-    async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
-        await checkpointer.setup()
+    dsn = _checkpointer_conn_string(conn_string)
+    async with AsyncConnectionPool(
+        conninfo=dsn,
+        min_size=agent_settings.CHECKPOINTER_POOL_MIN_SIZE
+        if min_size is None
+        else min_size,
+        max_size=agent_settings.CHECKPOINTER_POOL_MAX_SIZE
+        if max_size is None
+        else max_size,
+        # Both are required by `AsyncPostgresSaver`: it issues its own
+        # transactions, and reads rows back as mappings.
+        kwargs={"autocommit": True, "row_factory": dict_row},
+        open=False,
+    ) as pool:
+        await pool.open(wait=True)
+        # `row_factory=dict_row` above is what actually makes this pool hand
+        # out dict rows, but it is passed as a runtime kwarg, so the
+        # constructor's return type still says tuples. The cast states what the
+        # kwargs already guarantee.
+        checkpointer = AsyncPostgresSaver(
+            cast("AsyncConnectionPool[AsyncConnection[dict[str, Any]]]", pool)
+        )
         yield build_graph().compile(checkpointer=checkpointer)

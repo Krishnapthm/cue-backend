@@ -118,6 +118,25 @@ class AgentSettings(BaseSettings):
     # so latency spent thinking about a one-sentence status is latency wasted.
     MODEL_ORDER_STATUS_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
 
+    # Checkpointer connection pool (CUE-93). This pool is the graph's, and it
+    # is **separate from SQLAlchemy's** (`DATABASE_POOL_SIZE`): the checkpointer
+    # speaks psycopg, the app speaks asyncpg, and both count against the same
+    # Postgres `max_connections`. Size them together, not independently.
+    #
+    # Why these numbers. A pooled checkpointer borrows a connection for the
+    # duration of one checkpoint read or write - a few milliseconds - and
+    # returns it, so the pool is sized by *checkpoint operations in flight*,
+    # not by open SSE streams. That is the whole point of the change: before
+    # it, every request opened its own connection and a long-lived stream
+    # pinned it for the entire turn, so a handful of concurrent users
+    # exhausted the database. A turn is a few super-steps and therefore a few
+    # short writes, so 10 covers far more concurrent turns than 10.
+    #
+    # `min_size` keeps a couple warm so the first turn after an idle period
+    # does not pay connection setup on the user's latency.
+    CHECKPOINTER_POOL_MIN_SIZE: int = 2
+    CHECKPOINTER_POOL_MAX_SIZE: int = 10
+
     # Supabase project base URL, used to build recipe-photo object URLs (see
     # `app.agent.storage.SupabaseImageStore`). Optional so the app still
     # imports without it configured; `SupabaseImageStore.load` raises a clear
