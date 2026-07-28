@@ -30,6 +30,18 @@ PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
 REFUSE = "refuse"
 
+#: Nodes whose model output is prose meant for the user, and whose tokens may
+#: therefore be streamed to the client as they arrive.
+#:
+#: An allowlist, not a denylist, and deliberately so. Every other model call in
+#: this graph runs under `with_structured_output`, so its token stream is JSON
+#: fragments of an internal schema - including `GuardrailDecision.reason`,
+#: which is attacker-influenceable text that must never reach the user. A
+#: denylist would leak all of that the first time someone added a node and
+#: forgot to update it; an allowlist stays silent until a node is declared
+#: safe to stream.
+PROSE_NODES: frozenset[str] = frozenset({ORDER_STATUS})
+
 
 def build_graph() -> StateGraph[AgentState, CueContext]:
     """Build the agent's (uncompiled) chat loop.

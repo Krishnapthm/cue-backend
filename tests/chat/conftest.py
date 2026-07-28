@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -71,6 +72,12 @@ class FakeAgentGraph:
     reply: str = "Here's what you'll need..."
     raises: Exception | None = None
     calls: list[AgentCall] = field(default_factory=list)
+    #: Chunks `astream` replays, as `(stream_mode, chunk)` pairs. `None` means
+    #: "make up a plausible run that ends in `reply`", which is what most
+    #: tests want; a test that cares about the event sequence sets it.
+    chunks: list[tuple[str, Any]] | None = None
+    #: What `aget_state` reports as pending, as raw interrupt objects.
+    interrupts: tuple[Any, ...] = ()
 
     async def ainvoke(
         self,
@@ -86,6 +93,40 @@ class FakeAgentGraph:
             **state,
             "messages": [*state["messages"], AIMessage(content=self.reply)],
         }
+
+    def _default_chunks(self) -> list[tuple[str, Any]]:
+        return [
+            ("updates", {"route_turn": {"turn_intent": "recipe"}}),
+            (
+                "updates",
+                {"generate_recipe": {"messages": [AIMessage(content=self.reply)]}},
+            ),
+        ]
+
+    async def astream(
+        self,
+        state: dict[str, Any],
+        config: dict[str, Any] | None = None,
+        *,
+        context: CueContext | None = None,
+        stream_mode: list[str] | str | None = None,
+    ) -> AsyncIterator[tuple[str, Any]]:
+        self.calls.append(AgentCall(state=state, config=config, context=context))
+        if self.raises is not None:
+            raise self.raises
+        for chunk in self.chunks if self.chunks is not None else self._default_chunks():
+            yield chunk
+
+    async def aget_state(self, config: dict[str, Any]) -> Any:
+        return SimpleNamespace(interrupts=self.interrupts)
+
+
+@dataclass(frozen=True)
+class FakeInterrupt:
+    """Stands in for a LangGraph `Interrupt`: an id and an opaque payload."""
+
+    id: str
+    value: Any
 
 
 #: Signature of the `with_address` fixture: (session_id, address_id=...) -> None.
