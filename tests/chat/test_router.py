@@ -172,6 +172,40 @@ async def test_get_returns_the_session_with_its_ordered_transcript(
     ]
 
 
+async def test_update_session_sets_the_selected_address(
+    authed_client: httpx.AsyncClient,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+
+    response = await authed_client.patch(
+        f"/chat/sessions/{session_id}",
+        json={"selected_address_id": "addr-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["selected_address_id"] == "addr-1"
+    detail = await authed_client.get(f"/chat/sessions/{session_id}")
+    assert detail.json()["selected_address_id"] == "addr-1"
+
+
+async def test_update_session_returns_404_for_another_users_session(
+    authed_client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    other_user: User,
+) -> None:
+    other_session = ChatSession(user_id=other_user.id)
+    db_session.add(other_session)
+    await db_session.commit()
+    await db_session.refresh(other_session)
+
+    response = await authed_client.patch(
+        f"/chat/sessions/{other_session.id}",
+        json={"selected_address_id": "addr-1"},
+    )
+
+    assert response.status_code == 404
+
+
 async def test_add_message_requires_authentication(client: httpx.AsyncClient) -> None:
     response = await client.post(
         f"/chat/sessions/{uuid.uuid4()}/messages",

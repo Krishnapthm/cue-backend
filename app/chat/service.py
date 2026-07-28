@@ -110,6 +110,34 @@ async def create_session(session: AsyncSession, user_id: int) -> ChatSession:
     return chat_session
 
 
+async def set_selected_address(
+    session: AsyncSession,
+    user_id: int,
+    session_id: uuid.UUID,
+    selected_address_id: str,
+) -> ChatSession:
+    """Persist the delivery address selected for a user's chat session.
+
+    Args:
+        session: An active database session.
+        user_id: The Cue user who must own `session_id`.
+        session_id: The chat session to update.
+        selected_address_id: The external Swiggy address ID to use for carts.
+
+    Returns:
+        The updated chat session.
+
+    Raises:
+        ChatSessionNotFoundError: If `session_id` does not exist or is not
+            owned by `user_id`.
+    """
+    chat_session = await get_session(session, user_id, session_id)
+    chat_session.selected_address_id = selected_address_id
+    await session.commit()
+    await session.refresh(chat_session)
+    return chat_session
+
+
 async def list_sessions(session: AsyncSession, user_id: int) -> list[ChatSession]:
     """Return `user_id`'s chat sessions for the Recents list (R8.1).
 

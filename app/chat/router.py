@@ -19,6 +19,7 @@ from app.chat.schemas import (
     SessionAgentState,
     SessionDetail,
     SessionSummary,
+    UpdateSessionRequest,
 )
 from app.chat.sse import format_event
 from app.database import DbSession
@@ -53,6 +54,28 @@ async def list_recents(user: CurrentUser, session: DbSession) -> list[SessionSum
     """Return the caller's Recents list (R8.1); no date grouping or search."""
     sessions = await service.list_sessions(session, user.id)
     return [SessionSummary.model_validate(chat_session) for chat_session in sessions]
+
+
+@router.patch(
+    "/{session_id}",
+    response_model=SessionSummary,
+    status_code=status.HTTP_200_OK,
+    summary="Set the delivery address for a chat session",
+    responses={
+        status.HTTP_404_NOT_FOUND: {"description": "Session not found"},
+    },
+)
+async def update_session(
+    session_id: uuid.UUID,
+    request: UpdateSessionRequest,
+    user: CurrentUser,
+    session: DbSession,
+) -> SessionSummary:
+    """Save the caller-selected Swiggy delivery address for this session."""
+    chat_session = await service.set_selected_address(
+        session, user.id, session_id, request.selected_address_id
+    )
+    return SessionSummary.model_validate(chat_session)
 
 
 @router.get(
