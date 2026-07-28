@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
 from app.agent.config import ModelRole
 from app.agent.exceptions import RecipeGenerationError
@@ -173,21 +173,17 @@ async def test_generate_recipe_node_raises_on_empty_messages() -> None:
         await recipe_node.generate_recipe_node(empty_state)
 
 
-async def test_generate_recipe_node_appends_a_rendered_reply(
+async def test_generate_recipe_node_defers_the_rendered_reply_until_after_choice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The reply is deterministic formatting of already-validated fields, not
-    # a second model call - the fake queues exactly one result, so a second
-    # call would raise IndexError.
+    # Rendering happens after the ready-made choice has either been skipped or
+    # answered, so the user never sees constituents before choosing them.
     recipe = _recipe()
     _stub_chat_model(monkeypatch, [recipe])
 
     update = await recipe_node.generate_recipe_node(_state("pasta aglio e olio"))
 
-    messages = update["messages"]
-    assert len(messages) == 1
-    assert isinstance(messages[0], AIMessage)
-    assert str(messages[0].content) == recipe_node.render_recipe(recipe)
+    assert "messages" not in update
 
 
 def test_render_recipe_lists_every_ingredient() -> None:

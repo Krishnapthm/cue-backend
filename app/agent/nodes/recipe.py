@@ -7,7 +7,6 @@ from typing import Any, cast
 
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import (
-    AIMessage,
     HumanMessage,
     ImageContentBlock,
     SystemMessage,
@@ -39,6 +38,12 @@ _SYSTEM_PROMPT = (
     "rather than omitting it.\n"
     "- List every ingredient the dish plausibly needs; do not truncate or "
     "cap the ingredient list for the sake of brevity.\n"
+    "- Populate scratch_components only for substantial sub-components that "
+    "have at least two named ingredients in this recipe and are commonly sold "
+    "ready-made (for example dosa batter, samosa pastry, pizza dough, curry "
+    "paste, stock, or a ground spice mix). For each, give its user-facing "
+    "name, the ready-made item to search for, and the exact ingredient names "
+    "it replaces. Leave it empty when there is no meaningful choice.\n"
     "- Quantities and units are optional per ingredient - omit them (leave "
     "null) rather than guessing a number you are not reasonably confident "
     "about.\n"
@@ -111,8 +116,8 @@ def _render_parsed_photo(state: AgentState) -> dict[str, Any]:
         state: The current graph state, on a turn the router labelled PHOTO.
 
     Returns:
-        A partial state update carrying the transcript message. `recipe` is
-        already on state and is not rewritten.
+        A partial state update. `recipe` is already on state and is not
+        rewritten; rendering waits until the scratch-choice step.
 
     Raises:
         RecipeGenerationError: The turn is a photo turn but carries no parsed
@@ -129,7 +134,7 @@ def _render_parsed_photo(state: AgentState) -> dict[str, Any]:
             state["session_id"],
         )
         raise RecipeGenerationError()
-    return {"messages": [AIMessage(content=render_recipe(recipe))]}
+    return {"scratch_component": None, "scratch_choice": None}
 
 
 async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
@@ -152,10 +157,10 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
             last one is treated as the user's dish-name intent.
 
     Returns:
-        A partial state update containing the generated `recipe` and the
-        `AIMessage` rendering it for the transcript. The message is
-        deterministic formatting of already-validated fields, not a second
-        model call. This is a partial dict rather than a full `AgentState`
+        A partial state update containing the generated `recipe`. Rendering
+        waits until the pre-checklist scratch-choice step, so ingredients do
+        not appear before the user has made a meaningful source choice. This
+        is a partial dict rather than a full `AgentState`
         (LangGraph's node convention) - a partial dict cannot satisfy the
         total `AgentState` TypedDict under strict typing. `messages` is
         appended, not overwritten, by the `add_messages` reducer.
@@ -217,8 +222,9 @@ async def generate_recipe_node(state: AgentState) -> dict[str, Any]:
 
     return {
         "recipe": recipe,
-        "messages": [AIMessage(content=render_recipe(recipe))],
         "have_marks": set(),
+        "scratch_component": None,
+        "scratch_choice": None,
     }
 
 
@@ -378,4 +384,9 @@ async def parse_recipe_photo_node(state: AgentState) -> dict[str, Any]:
         # schema; this guards that contract defensively at runtime.
         raise RecipeGenerationError()
 
-    return {"recipe": recipe, "have_marks": set()}
+    return {
+        "recipe": recipe,
+        "have_marks": set(),
+        "scratch_component": None,
+        "scratch_choice": None,
+    }

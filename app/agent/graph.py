@@ -34,6 +34,10 @@ from app.agent.nodes.normalize import normalize_ingredients_node
 from app.agent.nodes.order_status import order_status_node
 from app.agent.nodes.recipe import generate_recipe_node, parse_recipe_photo_node
 from app.agent.nodes.route import route_turn
+from app.agent.nodes.scratch_choice import (
+    choose_scratch_component,
+    find_scratch_component,
+)
 from app.agent.state import AgentState
 from app.config import settings
 
@@ -49,6 +53,8 @@ GENERATE_RECIPE = "generate_recipe"
 PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
 NORMALIZE_INGREDIENTS = "normalize_ingredients"
+FIND_SCRATCH_COMPONENT = "find_scratch_component"
+CHOOSE_SCRATCH_COMPONENT = "choose_scratch_component"
 CONFIRM_CHECKLIST = "confirm_checklist"
 REFUSE = "refuse"
 
@@ -94,6 +100,11 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     START -> route_turn --(recipe)--------------> generate_recipe
                  |                                      ^    |
                  +-------(photo)--> parse_recipe_photo --+    v
+                 |                              find_scratch_component
+                 |                                        |
+                 |                              choose_scratch_component
+                 |                                   (may pause)
+                 |                                        |
                  |                                    normalize_ingredients
                  |                                            |
                  |                                            v
@@ -126,14 +137,15 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     turn `generate_recipe` renders the already-parsed recipe rather than
     generating a second one - see `_render_parsed_photo`.
 
-    `generate_recipe -> normalize_ingredients -> confirm_checklist` are static
-    edges: there is no routing decision to make, every recipe turn produces a
-    checklist and every checklist is confirmed.
+    The recipe path is static through ready-made discovery and the optional
+    scratch choice, then normalization and checklist confirmation. Discovery
+    verifies availability against the selected address before it permits the
+    choice card; a recipe with no verified component simply carries on.
 
-    `confirm_checklist` is the graph's **only** interrupt, so a compiled graph
-    without a checkpointer can run every branch except that pause. Checkout left
-    the graph entirely (CUE-80), which is why there is no second one - and why
-    no non-idempotent mutation sits behind a pause at all.
+    The scratch choice and `confirm_checklist` are both interrupts, so a
+    compiled graph needs a checkpointer for every recipe turn. Checkout left
+    the graph entirely (CUE-80), so no non-idempotent mutation sits before a
+    pause.
 
     The edge out of `confirm_checklist` is conditional and returns `Send`s, one
     per ingredient the user still needs, so the workers run concurrently in a
@@ -173,6 +185,8 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     )
     builder.add_node(ORDER_STATUS, order_status_node, retry_policy=NETWORK_RETRY)
     builder.add_node(NORMALIZE_INGREDIENTS, normalize_ingredients_node)
+    builder.add_node(FIND_SCRATCH_COMPONENT, find_scratch_component)
+    builder.add_node(CHOOSE_SCRATCH_COMPONENT, choose_scratch_component)
     builder.add_node(CONFIRM_CHECKLIST, confirm_checklist)
     builder.add_node(
         MATCH_INGREDIENT,
@@ -183,7 +197,9 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_node(REFUSE, refuse_node)
     builder.add_edge(START, ROUTE_TURN)
     builder.add_edge(PARSE_RECIPE_PHOTO, GENERATE_RECIPE)
-    builder.add_edge(GENERATE_RECIPE, NORMALIZE_INGREDIENTS)
+    builder.add_edge(GENERATE_RECIPE, FIND_SCRATCH_COMPONENT)
+    builder.add_edge(FIND_SCRATCH_COMPONENT, CHOOSE_SCRATCH_COMPONENT)
+    builder.add_edge(CHOOSE_SCRATCH_COMPONENT, NORMALIZE_INGREDIENTS)
     builder.add_edge(NORMALIZE_INGREDIENTS, CONFIRM_CHECKLIST)
     builder.add_node(COMPOSE_CART, compose_cart_node)
     builder.add_node(REPORT_CART, report_cart_node)

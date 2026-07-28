@@ -139,9 +139,14 @@ async def test_parse_recipe_photo_node_returns_recipe_on_state(
     )
 
     # The node returns a partial state update, not a full AgentState.
-    # `have_marks` is cleared because a new recipe means a new checklist;
-    # see `generate_recipe_node`'s `Returns` for what stale marks break.
-    assert update == {"recipe": recipe, "have_marks": set()}
+    # Recipe-turn state persists in the checkpoint, so a new photo clears both
+    # stale checklist marks and any prior ready-made choice/component.
+    assert update == {
+        "recipe": recipe,
+        "have_marks": set(),
+        "scratch_component": None,
+        "scratch_choice": None,
+    }
     assert update["recipe"].estimated_time_minutes == 90
     assert [i.name for i in update["recipe"].ingredients] == [
         "lasagna sheets",
@@ -185,9 +190,14 @@ async def test_parse_recipe_photo_node_retries_once_on_malformed_output(
 
     update = await recipe_node.parse_recipe_photo_node(_state())
 
-    # `have_marks` is cleared because a new recipe means a new checklist;
-    # see `generate_recipe_node`'s `Returns` for what stale marks break.
-    assert update == {"recipe": recipe, "have_marks": set()}
+    # Recipe-turn state persists in the checkpoint, so a new photo clears both
+    # stale checklist marks and any prior ready-made choice/component.
+    assert update == {
+        "recipe": recipe,
+        "have_marks": set(),
+        "scratch_component": None,
+        "scratch_choice": None,
+    }
 
 
 async def test_parse_recipe_photo_node_raises_domain_error_after_two_failures(

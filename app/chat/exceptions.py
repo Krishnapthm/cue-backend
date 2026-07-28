@@ -25,11 +25,11 @@ class NoPendingChecklistError(AppError):
 
 
 class InvalidChecklistAnswerError(AppError):
-    """A checklist answer did not carry a readable `have` list.
+    """A structured interrupt answer did not match its pending card.
 
     A resume we cannot read is not consent. Defaulting it to "none of them"
     would silently buy the user everything they already own.
     """
 
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
-    detail = "A checklist answer must carry a 'have' list of ingredient names."
+    detail = "This answer does not match the pending choice."

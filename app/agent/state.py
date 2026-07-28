@@ -12,6 +12,8 @@ from app.agent.schemas import (
     GuardrailDecision,
     MatchResult,
     NormalizedIngredient,
+    ScratchChoice,
+    ScratchComponent,
     TurnFailure,
     TurnIntent,
 )
@@ -60,6 +62,10 @@ class AgentState(TypedDict):
     have/need)` rows. It is `NotRequired` because it only exists once that
     node has run.
 
+    `scratch_component` is the one verified ready-made alternative selected
+    before ingredients are rendered. `scratch_choice` records the user's
+    answer, so a resumed or replayed thread does not ask the card again.
+
     `guardrail` is the entry guardrail's verdict for the current turn, kept
     for logs and traces rather than for rendering - see `GuardrailDecision`
     on why its `reason` never reaches the user. `NotRequired` for the same
@@ -107,6 +113,8 @@ class AgentState(TypedDict):
     image_object_path: NotRequired[str | None]
     have_marks: NotRequired[set[str]]
     normalized_ingredients: NotRequired[list[NormalizedIngredient]]
+    scratch_component: NotRequired[ScratchComponent | None]
+    scratch_choice: NotRequired[ScratchChoice | None]
     turn_intent: NotRequired[TurnIntent]
     matches: Annotated[NotRequired[list[MatchResult]], operator.add]
     cart_plan_id: NotRequired[int | None]

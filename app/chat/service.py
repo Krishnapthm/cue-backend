@@ -21,7 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.context import CueContext
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.graph import PROSE_NODES, CueGraph, thread_config
-from app.agent.schemas import CartReport, ChecklistDecision, MatchResult
+from app.agent.schemas import (
+    CartReport,
+    ChecklistDecision,
+    MatchResult,
+    ScratchChoiceDecision,
+)
 from app.agent.state import AgentState
 from app.chat.constants import ADDRESS_REQUIRED_MESSAGE
 from app.chat.exceptions import (
@@ -408,37 +413,33 @@ async def _persist_cart_report(
     )
 
 
-def _checklist_answer(request: CreateMessageRequest) -> ChecklistDecision | None:
-    """Read an inbound message as an answer to the checklist, if it is one.
+def _interrupt_answer(request: CreateMessageRequest) -> dict[str, Any] | None:
+    """Read an inbound message as a structured interrupt answer, if it is one.
 
-    A user `checklist` message is the resume value of `confirm_checklist`. The
-    same `kind` also carries the *question* when the assistant persists it, which
-    is why this is decided here on `role` and context rather than by validating
-    the payload in `CreateMessageRequest`: one kind, two directions, two shapes.
+    `kind='checklist'` carries both the existing checklist answer and the
+    scratch-choice answer. The pending interrupt's discriminated `ui` field
+    chooses the exact schema later in `_resume_input`; validating it here
+    would guess which card the session is actually waiting on.
 
     Args:
         request: The inbound message.
 
     Returns:
-        The decision, or `None` when this message is not a checklist answer.
-
-    Raises:
-        InvalidChecklistAnswerError: It is a user checklist message, but its
-            payload is not a readable `{"have": [...]}`.
+        The raw answer payload, or `None` when this message is not an interrupt
+        answer.
     """
     if (
         request.role is not MessageRole.USER
         or request.kind is not MessageKind.CHECKLIST
     ):
         return None
-    try:
-        return ChecklistDecision.model_validate(request.payload)
-    except ValidationError as exc:
-        raise InvalidChecklistAnswerError from exc
+    if request.payload is None or not ({"have", "choice"} & request.payload.keys()):
+        raise InvalidChecklistAnswerError
+    return request.payload
 
 
 async def _resume_input(
-    graph: CueGraph, session_id: uuid.UUID, answer: ChecklistDecision
+    graph: CueGraph, session_id: uuid.UUID, answer: dict[str, Any]
 ) -> Command[Any]:
     """Build the resume input for a session that is actually paused.
 
@@ -449,7 +450,7 @@ async def _resume_input(
     Args:
         graph: The compiled agent graph for this request.
         session_id: The session being resumed; its `str()` is the `thread_id`.
-        answer: The user's checklist decision.
+        answer: The user's structured card decision.
 
     Returns:
         `Command(resume=...)` - never a plain state dict, which would not error
@@ -462,7 +463,22 @@ async def _resume_input(
     state = await pending_interrupt(graph, session_id)
     if state.pending_interrupt is None:
         raise NoPendingChecklistError
-    return Command(resume=answer.model_dump())
+    payload = state.pending_interrupt.payload
+    if not isinstance(payload, dict):
+        raise InvalidChecklistAnswerError
+    try:
+        if payload.get("ui") == "checklist":
+            return Command(resume=ChecklistDecision.model_validate(answer).model_dump())
+        elif payload.get("ui") == "scratch_choice":
+            return Command(
+                resume=ScratchChoiceDecision.model_validate(answer).model_dump(
+                    mode="json"
+                )
+            )
+        else:
+            raise ValueError("Unknown interrupt payload.")
+    except (ValidationError, ValueError) as exc:
+        raise InvalidChecklistAnswerError from exc
 
 
 async def run_turn(
@@ -512,7 +528,7 @@ async def run_turn(
             user's message stays persisted; the global handler maps this to
             502.
     """
-    answer = _checklist_answer(request)
+    answer = _interrupt_answer(request)
     user_message = await append_message(session, user_id, session_id, request)
     if answer is None and not _runs_the_agent(request):
         return user_message, None
@@ -688,7 +704,7 @@ async def stream_turn(
             owned by `user_id`. Raised before anything is yielded, so the
             caller can still answer with a 404.
     """
-    answer = _checklist_answer(request)
+    answer = _interrupt_answer(request)
     await append_message(session, user_id, session_id, request)
     if answer is None and not _runs_the_agent(request):
         yield DoneEvent()

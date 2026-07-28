@@ -102,9 +102,7 @@ def flour_pepper_sugar() -> list[RecipeIngredient]:
 
 def test_assumed_staples_are_intentionally_narrow() -> None:
     assert frozenset({"salt", "water"}) == ASSUMED_STAPLES
-    assert {"cooking oil", "sugar", "cumin", "black pepper"}.isdisjoint(
-        ASSUMED_STAPLES
-    )
+    assert {"cooking oil", "sugar", "cumin", "black pepper"}.isdisjoint(ASSUMED_STAPLES)
 
 
 async def test_assumed_staples_never_reach_the_checklist_or_cart_path() -> None:

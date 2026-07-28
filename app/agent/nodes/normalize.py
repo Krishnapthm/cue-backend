@@ -48,13 +48,10 @@ def _is_bulk_staple(quantity: float | None, unit: str | None) -> bool:
     )
 
 
-def _is_assumed_staple(
-    name: str, quantity: float | None, unit: str | None
-) -> bool:
+def _is_assumed_staple(name: str, quantity: float | None, unit: str | None) -> bool:
     """Return whether an ingredient can safely be omitted from a checklist."""
-    return (
-        normalize_name(name) in ASSUMED_STAPLES
-        and not _is_bulk_staple(quantity, unit)
+    return normalize_name(name) in ASSUMED_STAPLES and not _is_bulk_staple(
+        quantity, unit
     )
 
 
