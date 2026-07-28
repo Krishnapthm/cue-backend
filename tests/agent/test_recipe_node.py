@@ -15,6 +15,7 @@ import pytest
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage
 
+from app.agent.config import ModelRole
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.nodes import recipe as recipe_node
 from app.agent.schemas import GeneratedRecipe, RecipeIngredient
@@ -72,8 +73,28 @@ def _recipe(dish_name: str = "pasta aglio e olio") -> GeneratedRecipe:
 
 def _stub_chat_model(
     monkeypatch: pytest.MonkeyPatch, results: list[GeneratedRecipe | Exception]
+) -> list[ModelRole]:
+    """Stub the model seam, returning the roles the node asked it for."""
+    roles: list[ModelRole] = []
+
+    def _get_chat_model(role: ModelRole) -> _FakeChatModel:
+        roles.append(role)
+        return _FakeChatModel(results)
+
+    monkeypatch.setattr(recipe_node, "get_chat_model", _get_chat_model)
+    return roles
+
+
+async def test_generate_recipe_node_asks_for_the_recipe_role(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(recipe_node, "get_chat_model", lambda: _FakeChatModel(results))
+    # Recipe generation decides correctness, so it gets the strong model -
+    # by role, never by naming the model id here.
+    roles = _stub_chat_model(monkeypatch, [_recipe()])
+
+    await recipe_node.generate_recipe_node(_state("pasta aglio e olio"))
+
+    assert roles == [ModelRole.RECIPE]
 
 
 async def test_generate_recipe_node_returns_recipe_on_state(

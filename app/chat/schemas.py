@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.agent.schemas import MatchResult
+from app.cart.schemas import MatchStatus
 
 
 class MessageKind(StrEnum):
@@ -91,3 +95,146 @@ class SessionDetail(BaseModel):
     title: str | None
     selected_address_id: str | None
     messages: list[MessageResponse]
+
+
+class StreamEventType(StrEnum):
+    """The named SSE events a streamed turn can emit.
+
+    This enum *is* the wire contract. LangGraph's own chunk shapes are an
+    internal detail that changes between versions and must never reach a
+    client, so every chunk is translated into one of these before it is sent.
+    """
+
+    TOKEN = "token"
+    MATCH = "match"
+    STAGE = "stage"
+    INTERRUPT = "interrupt"
+    ERROR = "error"
+    DONE = "done"
+
+
+class TokenEvent(BaseModel):
+    """A fragment of assistant prose, to be appended as it arrives.
+
+    Only nodes on `agent.graph.PROSE_NODES` produce these. Every other model
+    call in the graph emits structured JSON, which is internal.
+    """
+
+    event: Literal[StreamEventType.TOKEN] = StreamEventType.TOKEN
+    text: str
+
+
+class MatchEvent(BaseModel):
+    """One ingredient resolved, emitted the moment its worker finishes.
+
+    `ingredient_name` is a stable key, not a position. The fan-out's workers
+    finish out of order while the UI lists ingredients in recipe order, so the
+    client fills the row with this name in place rather than appending. The
+    parallelism is the point; serializing the workers to make the stream
+    ordered would trade the feature for the convenience.
+    """
+
+    event: Literal[StreamEventType.MATCH] = StreamEventType.MATCH
+    ingredient_name: str
+    status: MatchStatus
+    spin_id: str | None = None
+    product_name: str | None = None
+    pack_size: str | None = None
+    unit_price: Decimal | None = None
+    quantity: int | None = None
+    substitution_reason: str | None = None
+
+    @classmethod
+    def from_match(cls, match: MatchResult) -> Self:
+        """Build the wire event for one resolved ingredient."""
+        return cls(**match.model_dump())
+
+
+class StageEvent(BaseModel):
+    """The turn moved on to another node, so the UI can change its label."""
+
+    event: Literal[StreamEventType.STAGE] = StreamEventType.STAGE
+    node: str
+
+
+class InterruptEvent(BaseModel):
+    """The turn paused and is waiting on the user.
+
+    `payload` is whatever the node passed to `interrupt()` - the checklist to
+    confirm, the substitution to approve. `id` identifies which interrupt is
+    being answered when more than one is pending.
+    """
+
+    event: Literal[StreamEventType.INTERRUPT] = StreamEventType.INTERRUPT
+    id: str | None = None
+    payload: Any = None
+
+
+class StreamErrorCode(StrEnum):
+    """Why a streamed turn stopped early, at the granularity the app acts on."""
+
+    PROVIDER_AUTH = "provider_auth"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    PROVIDER_REJECTED = "provider_rejected"
+    AGENT_FAILED = "agent_failed"
+
+
+class RecoveryAction(StrEnum):
+    """What the app should offer the user after an `error` event."""
+
+    RECONNECT_SWIGGY = "reconnect_swiggy"
+    RETRY = "retry"
+
+
+class ErrorEvent(BaseModel):
+    """The turn failed after the response had already started.
+
+    By the time this is emitted the status code is long gone, so a failure
+    mid-stream cannot be a 500 - it has to be an event that names the action
+    that recovers it, followed by a clean close.
+    """
+
+    event: Literal[StreamEventType.ERROR] = StreamEventType.ERROR
+    code: StreamErrorCode
+    message: str
+    action: RecoveryAction
+
+
+class DoneEvent(BaseModel):
+    """The stream is over; nothing further will arrive on this connection.
+
+    `interrupted` distinguishes a finished turn from a paused one: on a pause
+    the client owes a decision, and can re-read it later from the session
+    state endpoint if the connection drops before it is answered.
+    """
+
+    event: Literal[StreamEventType.DONE] = StreamEventType.DONE
+    reply: str | None = None
+    message_id: int | None = None
+    interrupted: bool = False
+
+
+ChatStreamEvent = Annotated[
+    TokenEvent | MatchEvent | StageEvent | InterruptEvent | ErrorEvent | DoneEvent,
+    Field(discriminator="event"),
+]
+
+
+class PendingInterrupt(BaseModel):
+    """An interrupt the session is still waiting on."""
+
+    id: str | None = None
+    payload: Any = None
+
+
+class SessionAgentState(BaseModel):
+    """What the agent is waiting for on a session, if anything.
+
+    SSE drops every time the app is backgrounded, and a user can close the app
+    mid-checklist and come back the next day. The checkpointer has already
+    persisted the pending interrupt, so this is a cheap read that covers
+    reconnect and cold start with the same endpoint - without it, a dropped
+    connection leaves the client with no way to discover a decision is owed.
+    """
+
+    pending_interrupt: PendingInterrupt | None = None

@@ -1,9 +1,67 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ModelRole(StrEnum):
+    """What a node needs a model *for*, rather than which model it wants.
+
+    Nodes ask for a role; the id behind it lives in `AgentSettings` and is
+    overridable by env var. That indirection is what keeps model choice
+    swappable by config alone, and is why no node ever names a model.
+
+    The graph's nodes have genuinely different cost/quality profiles, which is
+    why one shared model id is no longer enough:
+
+    * `ROUTER` - classification only, on every single turn. Cheap, and run at
+      no reasoning effort; the router's job is a four-way label, not thought.
+    * `RECIPE` - decides correctness. A wrong ingredient list becomes a wrong
+      cart and then a wrong order, and the error is invisible until the user
+      is at the stove, so this role buys the strongest model in the system.
+    * `VISION` - reads a recipe photo into the same schema `RECIPE` produces,
+      with the same correctness stakes.
+
+    Deterministic nodes (`normalize_ingredients`, `select_variant`,
+    `propose_substitute`, `report_cart`, `refuse`) take no model at all and
+    have no role here.
+    """
+
+    ROUTER = "router"
+    RECIPE = "recipe"
+    VISION = "vision"
+
+
+class ReasoningEffort(StrEnum):
+    """How hard a reasoning-capable model should think before answering.
+
+    A closed enum rather than a free string: the value is passed straight to
+    the provider, and a typo would be a runtime provider error on the first
+    real turn rather than a config-load failure at startup.
+    """
+
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+
+
+@dataclass(frozen=True)
+class ModelChoice:
+    """The resolved model id (and effort, if any) behind one `ModelRole`.
+
+    `reasoning_effort` is `None` for roles whose model does not offer the
+    dial, so `providers.get_chat_model` can pass the kwarg only where it
+    means something rather than sending an unsupported argument.
+    """
+
+    model_id: str
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class AgentSettings(BaseSettings):
@@ -11,6 +69,9 @@ class AgentSettings(BaseSettings):
 
     Model provider choice is an open decision (PRD Section 12) and must stay
     swappable via config alone - never hard-coded in the graph or its nodes.
+    Model *ids* follow the same rule, per `ModelRole`: every role's id, and
+    the router's reasoning effort, are settings and therefore env vars
+    (`AGENT_MODEL_ROUTER`, `AGENT_MODEL_RECIPE`, ...).
     """
 
     model_config = SettingsConfigDict(
@@ -24,10 +85,27 @@ class AgentSettings(BaseSettings):
     # returns. PRD Section 12 is settled: OpenAI. Anthropic stays wired up so
     # the seam is a live two-provider choice rather than a dead branch.
     MODEL_PROVIDER: Literal["openai", "anthropic"] = "openai"
-    # Required: the provider-specific model id (e.g. "gpt-5.4" or
-    # "claude-opus-4-8"). No default - the deployment must state it
-    # explicitly, so a model swap is always a visible config change.
-    MODEL_NAME: str
+
+    # Per-role model ids. Unlike the single MODEL_NAME these replace, these
+    # carry defaults: the assignment below is a costed decision (see CUE-85),
+    # not a deployment preference, so a deployment that overrides one should
+    # be doing it deliberately rather than being forced to restate all three.
+    #
+    # Router: nano over 4o-mini. The headline input price is misleading -
+    # every turn re-sends a fixed system prompt, so most input tokens are
+    # *cached* ones, and nano caches at $0.02/M against 4o-mini's $0.075/M.
+    # On a realistic router call that is ~40% cheaper per call despite nano
+    # costing more per fresh token, and it adds the effort dial below.
+    MODEL_ROUTER: str = "gpt-5.4-nano-2026-03-17"
+    # Recipe and vision: luna, because these two decide correctness. The delta
+    # over nano is ~$0.0045/turn - the cheapest correctness insurance in the
+    # system - and luna's Feb 2026 cutoff is the most useful one for Indian
+    # grocery vocabulary, brand names, and pack conventions.
+    MODEL_RECIPE: str = "gpt-5.6-luna"
+    MODEL_VISION: str = "gpt-5.6-luna"
+    # The router emits a four-way label from an explicit rubric; reasoning
+    # tokens buy nothing there and are billed at output rates.
+    MODEL_ROUTER_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
 
     # Supabase project base URL, used to build recipe-photo object URLs (see
     # `app.agent.storage.SupabaseImageStore`). Optional so the app still
@@ -36,6 +114,28 @@ class AgentSettings(BaseSettings):
     SUPABASE_URL: str | None = None
     # Supabase Storage bucket that recipe photo uploads land in.
     RECIPE_IMAGE_BUCKET: str = "recipe-images"
+
+    def model_for(self, role: ModelRole) -> ModelChoice:
+        """Resolve one role to the model id (and effort) configured for it.
+
+        Args:
+            role: The role a node is asking for.
+
+        Returns:
+            The configured `ModelChoice`. `reasoning_effort` is only set for
+            roles whose model offers the dial - luna does not, so `RECIPE`
+            and `VISION` return `None` for it.
+        """
+        match role:
+            case ModelRole.ROUTER:
+                return ModelChoice(
+                    model_id=self.MODEL_ROUTER,
+                    reasoning_effort=self.MODEL_ROUTER_REASONING_EFFORT,
+                )
+            case ModelRole.RECIPE:
+                return ModelChoice(model_id=self.MODEL_RECIPE)
+            case ModelRole.VISION:
+                return ModelChoice(model_id=self.MODEL_VISION)
 
 
 @lru_cache
