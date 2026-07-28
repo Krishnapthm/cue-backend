@@ -628,7 +628,7 @@ def test_the_off_box_nodes_retry_and_the_local_ones_do_not() -> None:
         for name, node in builder.nodes.items()
         if node.retry_policy
     }
-    assert set(retried) == {"parse_recipe_photo", "order_status"}
+    assert set(retried) == {"parse_recipe_photo", "order_status", "match_ingredient"}
     for policy in retried.values():
         # LangGraph accepts one policy or a sequence of them; we set exactly one.
         policies = [policy] if isinstance(policy, RetryPolicy) else list(policy)

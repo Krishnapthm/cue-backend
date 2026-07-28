@@ -155,9 +155,18 @@ class _StubChatModel:
 
 @pytest.fixture
 def stub_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub the router and recipe models, and the pantry read, for one turn."""
+    """Stub the router and recipe models, the pantry read, and Swiggy search.
+
+    Search is stubbed because a *resumed* turn no longer stops at
+    `confirm_checklist`: it carries on into the ingredient fan-out (CUE-91),
+    which reaches off-box. Answering with no candidates keeps these tests about
+    pause and resume - every ingredient resolves to an `unavailable` row, which
+    needs no session and no network.
+    """
     from app.agent.nodes import recipe as recipe_module
     from app.agent.nodes import route as route_module
+    from app.instamart import service as instamart_service
+    from app.instamart.schemas import Product
     from app.pantry import service as pantry_service
 
     router = _StubRunnable([TurnClassification(intent=TurnIntent.RECIPE, reason="ok")])
@@ -185,6 +194,13 @@ def stub_turn(monkeypatch: pytest.MonkeyPatch) -> None:
         return set()
 
     monkeypatch.setattr(pantry_service, "stocked_names", _no_pantry)
+
+    async def _no_candidates(*_args: object, **_kwargs: object) -> list[Product]:
+        return []
+
+    # Patched on the service module itself, so `propose_substitute`'s own
+    # search is answered by the same stub rather than reaching for a session.
+    monkeypatch.setattr(instamart_service, "search_products", _no_candidates)
 
 
 def _turn(thread_id: str) -> AgentState:
@@ -238,6 +254,9 @@ async def test_resuming_after_a_process_restart_lands_the_marks(
 
     assert resumed["have_marks"] == {"salt"}
     assert "__interrupt__" not in resumed or not resumed["__interrupt__"]
+    # The resume runs on past the pause into the fan-out, and only for what the
+    # user did *not* tick: salt is theirs already, paneer is the shopping list.
+    assert [match.ingredient_name for match in resumed["matches"]] == ["paneer"]
 
 
 async def test_a_resume_on_a_different_thread_does_not_continue_the_first(
