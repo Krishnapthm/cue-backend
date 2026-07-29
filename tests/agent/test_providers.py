@@ -89,7 +89,7 @@ def test_each_role_resolves_to_its_own_configured_model() -> None:
         (ModelRole.ROUTER, "AGENT_MODEL_ROUTER", "model_name"),
         (ModelRole.RECIPE, "AGENT_MODEL_RECIPE", "model_name"),
         (ModelRole.VISION, "AGENT_MODEL_VISION", "model_name"),
-        (ModelRole.TITLE, "AGENT_MODEL_TITLE", "model"),
+        (ModelRole.TITLE, "AGENT_MODEL_TITLE", "model_name"),
     ],
 )
 def test_every_role_is_overridable_by_env_var(
@@ -135,11 +135,11 @@ def test_roles_without_the_effort_dial_send_no_effort_kwarg() -> None:
         assert model.reasoning_effort is None
 
 
-def test_the_title_role_uses_its_configured_anthropic_provider() -> None:
+def test_the_title_role_uses_the_default_openai_provider() -> None:
     model = get_chat_model(ModelRole.TITLE, _settings())
 
-    assert isinstance(model, ChatAnthropic)
-    assert model.model == "claude-haiku-4-5-20251001"
+    assert isinstance(model, ChatOpenAI)
+    assert model.model_name == "gpt-4o-mini"
     assert (
         _settings().model_for(ModelRole.TITLE).reasoning_effort is ReasoningEffort.NONE
     )

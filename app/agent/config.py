@@ -70,7 +70,6 @@ class ModelChoice:
 
     model_id: str
     reasoning_effort: ReasoningEffort | None = None
-    provider: Literal["openai", "anthropic"] | None = None
 
 
 class AgentSettings(BaseSettings):
@@ -116,14 +115,10 @@ class AgentSettings(BaseSettings):
     # node rewrites a structured payload the service layer already validated
     # into one sentence - the model is doing wording, not judgement.
     MODEL_ORDER_STATUS: str = "gpt-5.4-nano-2026-03-17"
-    # Session titling is a low-stakes 2-4 word summarisation job. Haiku 4.5
-    # is the inexpensive, low-latency model available through the configured
-    # provider seam; deployments can replace it with AGENT_MODEL_TITLE.
-    MODEL_TITLE: str = "claude-haiku-4-5-20251001"
-    # Haiku is an Anthropic model while the primary cooking models use the
-    # configurable default provider. Keep this per-role override in settings
-    # alongside the id so deployments can change either without node edits.
-    MODEL_TITLE_PROVIDER: Literal["openai", "anthropic"] = "anthropic"
+    # Session titling is a low-stakes 2-4 word summarisation job. Use the
+    # configured OpenAI provider's inexpensive, low-latency model; deployments
+    # can replace it with AGENT_MODEL_TITLE when product needs change.
+    MODEL_TITLE: str = "gpt-4o-mini"
     # The router emits a four-way label from an explicit rubric; reasoning
     # tokens buy nothing there and are billed at output rates.
     MODEL_ROUTER_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
@@ -189,7 +184,6 @@ class AgentSettings(BaseSettings):
                 return ModelChoice(
                     model_id=self.MODEL_TITLE,
                     reasoning_effort=self.MODEL_TITLE_REASONING_EFFORT,
-                    provider=self.MODEL_TITLE_PROVIDER,
                 )
 
 
