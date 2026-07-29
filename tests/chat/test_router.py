@@ -745,6 +745,29 @@ async def test_a_checklist_answer_resumes_the_same_thread(
     assert call.config == {"configurable": {"thread_id": session_id}}
 
 
+async def test_a_scratch_choice_answer_resumes_the_same_thread(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.interrupts = (FakeInterrupt(id="int-1", value={"ui": "scratch_choice"}),)
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={
+            "role": "user",
+            "kind": "checklist",
+            "payload": {"choice": "ready_made"},
+        },
+    )
+
+    assert response.status_code == 201
+    assert isinstance(fake_agent.calls[0].state, Command)
+    assert fake_agent.calls[0].state.resume == {"choice": "ready_made"}
+
+
 async def test_a_checklist_answer_accepts_the_cart_button_payload(
     authed_client: httpx.AsyncClient,
     fake_agent: FakeAgentGraph,
@@ -766,6 +789,7 @@ async def test_a_checklist_answer_accepts_the_cart_button_payload(
     )
 
     assert response.status_code == 201
+    assert isinstance(fake_agent.calls[0].state, Command)
     assert fake_agent.calls[0].state.resume == {"have": ["salt", "pepper"]}
 
 

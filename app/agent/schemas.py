@@ -18,6 +18,14 @@ class RecipeIngredient(BaseModel):
     unit: str | None = None
 
 
+class ScratchComponent(BaseModel):
+    """One component that can meaningfully be made or bought ready-made."""
+
+    name: str = Field(min_length=1)
+    ready_made_name: str = Field(min_length=1)
+    constituent_names: list[str] = Field(min_length=2)
+
+
 class GeneratedRecipe(BaseModel):
     """A structured, LLM-generated recipe for a given dish name.
 
@@ -31,6 +39,37 @@ class GeneratedRecipe(BaseModel):
     estimated_time_minutes: int
     ingredients: list[RecipeIngredient]
     method_summary: str
+    scratch_components: list[ScratchComponent] = Field(default_factory=list)
+
+
+class ScratchChoice(StrEnum):
+    """How the user wants to source a recipe component."""
+
+    READY_MADE = "ready_made"
+    FROM_SCRATCH = "from_scratch"
+
+
+class ScratchChoiceOption(BaseModel):
+    """One selectable option on a scratch-choice card."""
+
+    id: ScratchChoice
+    label: str
+
+
+class ScratchChoiceInterrupt(BaseModel):
+    """The pre-checklist choice card for one verified recipe component."""
+
+    ui: Literal["scratch_choice"] = "scratch_choice"
+    dish_name: str
+    component_name: str
+    ready_made_name: str
+    options: list[ScratchChoiceOption]
+
+
+class ScratchChoiceDecision(BaseModel):
+    """The user's source choice for a verified recipe component."""
+
+    choice: ScratchChoice
 
 
 class ScopeVerdict(StrEnum):

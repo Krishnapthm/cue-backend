@@ -127,12 +127,16 @@ class FakeAgentGraph:
             report: dict[str, Any] = {"messages": [], "cart_report": self.cart_report}
             if isinstance(state, Command):
                 resumed = cast("dict[str, Any]", state.resume)
-                report["have_marks"] = set(resumed["have"])
+                if "have" in resumed:
+                    report["have_marks"] = set(resumed["have"])
             return report
         if isinstance(state, Command):
             # A resume carries no state of its own; the checkpointer has it.
             resume = cast("dict[str, Any]", state.resume)
-            return {"messages": [], "have_marks": set(resume["have"])}
+            update: dict[str, Any] = {"messages": []}
+            if "have" in resume:
+                update["have_marks"] = set(resume["have"])
+            return update
         return {
             **state,
             "messages": [*state["messages"], AIMessage(content=self.reply)],

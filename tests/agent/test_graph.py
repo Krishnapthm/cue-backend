@@ -230,6 +230,8 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
         "parse_recipe_photo",
         "order_status",
         "normalize_ingredients",
+        "find_scratch_component",
+        "choose_scratch_component",
         "refuse",
     } <= set(drawable.nodes)
     edges = {(e.source, e.target) for e in drawable.edges}
@@ -242,14 +244,15 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
 
 
 def test_the_recipe_branch_runs_through_the_checklist() -> None:
-    # A recipe turn always produces a checklist and every checklist is
-    # confirmed, so these are static edges and `generate_recipe` no longer ends
-    # the turn on its own.
+    # A recipe turn schedules a title, offers any verified ready-made
+    # component, then always produces and confirms a checklist.
     drawable = graph_module.build_graph().compile().get_graph()
 
     edges = {(e.source, e.target) for e in drawable.edges}
     assert ("generate_recipe", "schedule_title") in edges
-    assert ("schedule_title", "normalize_ingredients") in edges
+    assert ("schedule_title", "find_scratch_component") in edges
+    assert ("find_scratch_component", "choose_scratch_component") in edges
+    assert ("choose_scratch_component", "normalize_ingredients") in edges
     assert ("normalize_ingredients", "confirm_checklist") in edges
     # The checklist no longer ends the turn: answering it fans out into the
     # cart path, which is what actually closes it (CUE-91/92).
