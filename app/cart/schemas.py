@@ -19,7 +19,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.instamart.schemas import Cart
+from app.instamart.schemas import Cart, ProductRating
 
 
 class MatchStatus(StrEnum):
@@ -52,6 +52,8 @@ class SelectedVariant(BaseModel):
     product_name: str | None = None
     pack_size: str | None = None
     unit_price: Decimal | None = None
+    image_url: str | None = None
+    rating: ProductRating | None = None
     # Purchasable pack count for the needed quantity (R4.5), None when
     # `unavailable` or when quantity math wasn't computable.
     quantity: int | None = None

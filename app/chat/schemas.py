@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.agent.schemas import MatchResult
 from app.cart.schemas import MatchStatus
+from app.instamart.schemas import ProductRating
 
 
 class MessageKind(StrEnum):
@@ -181,6 +182,8 @@ class MatchEvent(BaseModel):
     product_name: str | None = None
     pack_size: str | None = None
     unit_price: Decimal | None = None
+    image_url: str | None = None
+    rating: ProductRating | None = None
     quantity: int | None = None
     substitution_reason: str | None = None
 

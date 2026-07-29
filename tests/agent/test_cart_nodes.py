@@ -33,7 +33,7 @@ from app.agent.schemas import (
 from app.agent.state import AgentState
 from app.cart.schemas import ComposeCartResult, MatchStatus
 from app.instamart.constants import TOOL_UPDATE_CART
-from app.instamart.schemas import Cart, CartLineItem
+from app.instamart.schemas import Cart, CartLineItem, ProductRating
 from app.models.cart import CartPlan, CartPlanItem
 from app.models.chat import ChatSession
 from app.models.user import User
@@ -56,6 +56,8 @@ def _match(
     unit_price: str | None = "90.00",
     substitution_reason: str | None = None,
     selection_reason: str | None = "Selected Amul 200 g.",
+    image_url: str | None = None,
+    rating: ProductRating | None = None,
 ) -> MatchResult:
     return MatchResult(
         ingredient_name=name,
@@ -64,6 +66,8 @@ def _match(
         product_name="Amul Paneer",
         pack_size="200 g",
         unit_price=Decimal(unit_price) if unit_price is not None else None,
+        image_url=image_url,
+        rating=rating,
         quantity=quantity,
         substitution_reason=substitution_reason,
         selection_reason=selection_reason,
@@ -351,6 +355,34 @@ def test_the_card_is_rendered_from_the_cart_swiggy_read_back() -> None:
     # Sent, accepted, and silently absent from the cart Swiggy returned.
     assert rows["butter"].in_cart is False
     assert rows["butter"].line_total is None
+
+
+def test_the_card_keeps_metadata_from_the_selected_spin_id() -> None:
+    """The cart row's metadata is the selected variation's, never a sibling's."""
+    selected = _match(
+        image_url="https://media-assets.swiggy.com/swiggy/image/upload/spin-1.png",
+        rating=ProductRating(value="4.5", count="51.5k"),
+    )
+    sibling = _match(
+        "butter",
+        spin_id="spin-2",
+        image_url="https://media-assets.swiggy.com/swiggy/image/upload/spin-2.png",
+    )
+    cart = Cart(items=[CartLineItem(spin_id="spin-1", quantity=2)])
+
+    update = report_cart_node(
+        _state(
+            [selected, sibling],
+            rows=[PANEER_ROW, BUTTER_ROW],
+            compose_result=_composed(cart=cart),
+        )
+    )
+
+    rows = {item.ingredient_name: item for item in update["cart_report"].items}
+    assert rows["paneer"].image_url.endswith("spin-1.png")
+    assert rows["paneer"].rating == ProductRating(value="4.5", count="51.5k")
+    assert rows["butter"].image_url.endswith("spin-2.png")
+    assert rows["butter"].rating is None
 
 
 def test_the_quantity_shown_is_the_carts_not_the_one_we_asked_for() -> None:
