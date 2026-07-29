@@ -140,9 +140,7 @@ def test_the_title_role_uses_the_default_openai_provider() -> None:
 
     assert isinstance(model, ChatOpenAI)
     assert model.model_name == "gpt-4o-mini"
-    assert (
-        _settings().model_for(ModelRole.TITLE).reasoning_effort is ReasoningEffort.NONE
-    )
+    assert _settings().model_for(ModelRole.TITLE).reasoning_effort is None
 
 
 def test_an_unknown_reasoning_effort_fails_at_config_load() -> None:

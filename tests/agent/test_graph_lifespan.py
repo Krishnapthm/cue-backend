@@ -26,6 +26,8 @@ from httpx import ASGITransport
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app.agent import graph as graph_module
+from app.agent.schemas import MatchResult
+from app.cart.schemas import MatchStatus
 from app.chat.dependencies import agent_graph
 
 
@@ -167,6 +169,20 @@ def test_the_dsn_is_normalised_whichever_spelling_it_arrives_in() -> None:
     )
 
     assert normalised == "postgresql://u:p@host/db"
+
+
+def test_checkpointer_serializer_explicitly_allows_agent_state_types(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A resumed cart must not depend on LangGraph's permissive MsgPack mode."""
+    result = MatchResult(ingredient_name="milk", status=MatchStatus.MATCHED)
+    serde = graph_module._checkpoint_serde()
+
+    with caplog.at_level("WARNING", logger="langgraph.checkpoint.serde.jsonplus"):
+        restored = serde.loads_typed(serde.dumps_typed(result))
+
+    assert restored == result
+    assert "Deserializing unregistered type" not in caplog.text
 
 
 # --- the dependency ---------------------------------------------------------

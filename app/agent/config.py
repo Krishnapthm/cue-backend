@@ -125,7 +125,6 @@ class AgentSettings(BaseSettings):
     # Same reasoning, and the stronger one: the user is waiting on this reply,
     # so latency spent thinking about a one-sentence status is latency wasted.
     MODEL_ORDER_STATUS_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
-    MODEL_TITLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
 
     # Checkpointer connection pool (CUE-93). This pool is the graph's, and it
     # is **separate from SQLAlchemy's** (`DATABASE_POOL_SIZE`): the checkpointer
@@ -181,10 +180,10 @@ class AgentSettings(BaseSettings):
                     reasoning_effort=self.MODEL_ORDER_STATUS_REASONING_EFFORT,
                 )
             case ModelRole.TITLE:
-                return ModelChoice(
-                    model_id=self.MODEL_TITLE,
-                    reasoning_effort=self.MODEL_TITLE_REASONING_EFFORT,
-                )
+                # gpt-4o-mini does not support the reasoning_effort request
+                # argument. Passing even "none" makes OpenAI reject title
+                # generation with HTTP 400.
+                return ModelChoice(model_id=self.MODEL_TITLE)
 
 
 @lru_cache
