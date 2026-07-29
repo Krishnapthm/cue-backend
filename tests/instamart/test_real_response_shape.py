@@ -201,8 +201,8 @@ async def test_search_products_parses_the_real_shape_end_to_end(
         "https://media-assets.swiggy.com/swiggy/image/upload/sugar.png"
     )
     assert first.variants[0].rating is not None
-    assert first.variants[0].rating.value == 4.5
-    assert first.variants[0].rating.count_display == "51.5k"
+    assert first.variants[0].rating.value == "4.5"
+    assert first.variants[0].rating.count == "51.5k"
     # `offerPrice` is what the user actually pays, so it wins over `mrp`.
     assert second.variants[0].price == Decimal("240")
     assert second.variants[1].price == Decimal("123")
@@ -234,8 +234,8 @@ def test_cart_line_items_preserve_optional_variant_metadata() -> None:
     cart = Cart.model_validate({"items": [both, only_image, neither]})
 
     assert cart.items[0].rating is not None
-    assert cart.items[0].rating.value == 4.6
-    assert cart.items[0].rating.count_display == "9.8k"
+    assert cart.items[0].rating.value == "4.6"
+    assert cart.items[0].rating.count == "9.8k"
     assert cart.items[1].image_url == only_image["imageUrl"]
     assert cart.items[1].rating is None
     assert cart.items[2].image_url is None

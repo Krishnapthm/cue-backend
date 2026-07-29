@@ -443,7 +443,7 @@ async def test_the_emitted_payload_is_exactly_what_the_sse_layer_parses(
                     pack_size="250 g",
                     price="90",
                     image_url="https://media-assets.swiggy.com/swiggy/image/upload/s1.png",
-                    rating=ProductRating(value=4.5, count_display="51.5k"),
+                    rating=ProductRating(value="4.5", count="51.5k"),
                 )
             ]
         },
@@ -462,7 +462,7 @@ async def test_the_emitted_payload_is_exactly_what_the_sse_layer_parses(
     assert event.unit_price == Decimal("90")
     assert event.image_url is not None
     assert event.image_url.endswith("s1.png")
-    assert event.rating == ProductRating(value=4.5, count_display="51.5k")
+    assert event.rating == ProductRating(value="4.5", count="51.5k")
 
 
 # --- failure isolation ------------------------------------------------------

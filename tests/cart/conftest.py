@@ -41,12 +41,14 @@ class FakeInstamart:
             including one fails the whole call, as the real tool does.
         drops: Spin ids Swiggy accepts and then silently omits from the cart
             it returns (`success: true`, item quietly gone).
+        metadata: Extra per-spin fields Swiggy includes in cart line read-backs.
         writes: Every `update_cart` argument list, for asserting call counts.
     """
 
     items: dict[str, int] = field(default_factory=dict)
     rejects: set[str] = field(default_factory=set)
     drops: set[str] = field(default_factory=set)
+    metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     writes: list[list[dict[str, Any]]] = field(default_factory=list)
 
     def _cart_payload(self) -> dict[str, Any]:
@@ -57,6 +59,7 @@ class FakeInstamart:
                         "spinId": spin_id,
                         "quantity": quantity,
                         "price": str(FAKE_UNIT_PRICE * quantity),
+                        **self.metadata.get(spin_id, {}),
                     }
                     for spin_id, quantity in self.items.items()
                 ],

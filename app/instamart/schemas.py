@@ -98,17 +98,16 @@ class CreateAddressRequest(BaseModel):
 class ProductRating(BaseModel):
     """A variation's rating as supplied by Instamart search results.
 
-    Swiggy sends the rating value as a numeric string and the count as an
-    already-rounded display value such as ``"51.5k"``. The value is safe to
-    parse to a float. The count is deliberately retained as ``count_display``:
-    the source has discarded the exact integer, so treating it as one here
-    would fabricate precision the client cannot recover.
+    Swiggy sends both fields as display strings, including already-rounded
+    counts such as ``"51.5k"``. Keep that object as-is so cart/search
+    responses do not fabricate precision or force clients to reverse a local
+    rename.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    value: float
-    count_display: str = Field(alias="count", serialization_alias="countDisplay")
+    value: str
+    count: str
 
 
 class ProductVariant(BaseModel):

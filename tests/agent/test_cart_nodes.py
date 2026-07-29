@@ -361,7 +361,7 @@ def test_the_card_keeps_metadata_from_the_selected_spin_id() -> None:
     """The cart row's metadata is the selected variation's, never a sibling's."""
     selected = _match(
         image_url="https://media-assets.swiggy.com/swiggy/image/upload/spin-1.png",
-        rating=ProductRating(value=4.5, count_display="51.5k"),
+        rating=ProductRating(value="4.5", count="51.5k"),
     )
     sibling = _match(
         "butter",
@@ -380,7 +380,7 @@ def test_the_card_keeps_metadata_from_the_selected_spin_id() -> None:
 
     rows = {item.ingredient_name: item for item in update["cart_report"].items}
     assert rows["paneer"].image_url.endswith("spin-1.png")
-    assert rows["paneer"].rating == ProductRating(value=4.5, count_display="51.5k")
+    assert rows["paneer"].rating == ProductRating(value="4.5", count="51.5k")
     assert rows["butter"].image_url.endswith("spin-2.png")
     assert rows["butter"].rating is None
 
