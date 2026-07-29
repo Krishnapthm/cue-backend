@@ -21,6 +21,42 @@ from app.pantry.service import normalize_name
 
 logger = logging.getLogger(__name__)
 
+#: Ingredients omitted from every checklist because they are universally present.
+#: Keep this deliberately narrow: omitting an ingredient a user needs to buy is
+#: worse than leaving an extra row for them to confirm.
+ASSUMED_STAPLES = frozenset({"salt", "water"})
+
+#: A bulk mass amount is an explicit exception to `ASSUMED_STAPLES`. A recipe
+#: calling for this much salt or water may be making a salt crust or another
+#: non-pantry preparation, so retaining it is safer than silently excluding it.
+_BULK_STAPLE_MASS_GRAMS = 500
+_GRAM_UNITS = frozenset({"g", "gram", "grams"})
+_KILOGRAM_UNITS = frozenset({"kg", "kilogram", "kilograms"})
+
+
+def _is_bulk_staple(quantity: float | None, unit: str | None) -> bool:
+    """Return whether an assumed staple has an unusually large mass amount."""
+    if quantity is None or unit is None:
+        return False
+
+    normalized_unit = normalize_name(unit)
+    if normalized_unit in _GRAM_UNITS:
+        return quantity >= _BULK_STAPLE_MASS_GRAMS
+    return (
+        normalized_unit in _KILOGRAM_UNITS
+        and quantity * 1000 >= _BULK_STAPLE_MASS_GRAMS
+    )
+
+
+def _is_assumed_staple(
+    name: str, quantity: float | None, unit: str | None
+) -> bool:
+    """Return whether an ingredient can safely be omitted from a checklist."""
+    return (
+        normalize_name(name) in ASSUMED_STAPLES
+        and not _is_bulk_staple(quantity, unit)
+    )
+
 
 async def _seed_have_marks(
     recipe_names: list[str], runtime: Runtime[CueContext]
@@ -63,7 +99,9 @@ async def normalize_ingredients_node(
     Deterministic, not model-driven: maps `state["recipe"].ingredients` (from
     either intake path - CUE-22 dish-name generation or CUE-23 photo parse,
     both produce a `GeneratedRecipe`) plus the have-list checkbox state in
-    `state["have_marks"]` into `list[NormalizedIngredient]`. Every source
+    `state["have_marks"]` into `list[NormalizedIngredient]`. Ingredients in
+    `ASSUMED_STAPLES` are removed before any checklist or cart path sees them,
+    except for explicitly bulk mass quantities. Every remaining source
     ingredient produces a row -
     `HAVE` rows are kept for display, and only `NEED` rows are later handed
     to matching (the caller filters on `status`, not this node).
@@ -132,6 +170,12 @@ async def normalize_ingredients_node(
             "Cannot normalize ingredients: state has no recipe to normalize."
         )
 
+    recipe_ingredients = [
+        ingredient
+        for ingredient in recipe.ingredients
+        if not _is_assumed_staple(ingredient.name, ingredient.quantity, ingredient.unit)
+    ]
+
     have_marks = state.get("have_marks") or set()
     if have_marks:
         logger.debug(
@@ -141,7 +185,7 @@ async def normalize_ingredients_node(
         )
     else:
         have_marks = await _seed_have_marks(
-            [ingredient.name for ingredient in recipe.ingredients], runtime
+            [ingredient.name for ingredient in recipe_ingredients], runtime
         )
         logger.debug(
             "Seeded %d have-marks from the pantry for session %s.",
@@ -158,7 +202,7 @@ async def normalize_ingredients_node(
     # used to find the existing bucket to merge a repeated non-None unit into.
     unit_bucket_index: dict[str, dict[str, int]] = {}
 
-    for ingredient in recipe.ingredients:
+    for ingredient in recipe_ingredients:
         name = ingredient.name
         buckets = buckets_by_name.setdefault(name, [])
         if ingredient.unit is None:

@@ -325,7 +325,7 @@ async def test_a_recipe_turn_produces_a_checklist(
     result = await graph.ainvoke(_state("paneer butter masala"), context=_context())
 
     normalized = result["normalized_ingredients"]
-    assert [row.name for row in normalized] == ["paneer", "butter", "salt"]
+    assert [row.name for row in normalized] == ["paneer", "butter"]
     # An empty pantry leaves the whole list to be bought.
     assert all(row.status == IngredientStatus.NEED for row in normalized)
 
@@ -349,8 +349,8 @@ async def test_the_checklist_arrives_pre_ticked_from_the_users_pantry(
     db_session.add(
         PantryItem(
             user_id=user.id,
-            name="Salt",
-            name_normalized=normalize_name("Salt"),
+            name="Paneer",
+            name_normalized=normalize_name("Paneer"),
             category=PantryCategory.SPICES_AND_MASALAS.value,
             level=LEVEL_MAX,
         )
@@ -367,8 +367,7 @@ async def test_the_checklist_arrives_pre_ticked_from_the_users_pantry(
     )
 
     by_name = {row.name: row for row in result["normalized_ingredients"]}
-    assert by_name["salt"].status == IngredientStatus.HAVE
-    assert by_name["paneer"].status == IngredientStatus.NEED
+    assert by_name["paneer"].status == IngredientStatus.HAVE
     assert by_name["butter"].status == IngredientStatus.NEED
 
 
@@ -537,7 +536,6 @@ async def test_a_photo_turn_produces_a_checklist_with_no_text_input(
     assert [row.name for row in result["normalized_ingredients"]] == [
         "paneer",
         "butter",
-        "salt",
     ]
 
 
