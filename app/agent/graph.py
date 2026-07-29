@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import RetryPolicy
@@ -34,7 +35,22 @@ from app.agent.nodes.normalize import normalize_ingredients_node
 from app.agent.nodes.order_status import order_status_node
 from app.agent.nodes.recipe import generate_recipe_node, parse_recipe_photo_node
 from app.agent.nodes.route import route_turn
+from app.agent.nodes.title import schedule_title_node
+from app.agent.schemas import (
+    CartReport,
+    CartReportItem,
+    GeneratedRecipe,
+    GuardrailDecision,
+    IngredientStatus,
+    MatchResult,
+    NormalizedIngredient,
+    ScopeVerdict,
+    TurnFailure,
+    TurnFailureKind,
+    TurnIntent,
+)
 from app.agent.state import AgentState
+from app.cart.schemas import ComposeCartResult, MatchStatus
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -46,6 +62,7 @@ CueGraph = CompiledStateGraph[AgentState, CueContext]
 
 ROUTE_TURN = "route_turn"
 GENERATE_RECIPE = "generate_recipe"
+SCHEDULE_TITLE = "schedule_title"
 PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
 NORMALIZE_INGREDIENTS = "normalize_ingredients"
@@ -86,6 +103,31 @@ PROSE_NODES: frozenset[str] = frozenset({ORDER_STATUS})
 #: through; see `match_ingredient`.
 NETWORK_RETRY = RetryPolicy(max_attempts=3)
 
+# LangGraph will otherwise allow these application-owned checkpoint values only
+# in permissive mode and warn on every recovery. Keeping this explicit makes
+# strict MsgPack safe to enable and prevents a future LangGraph release from
+# turning a resumed chat into a failed request.
+_CHECKPOINTED_MSGPACK_TYPES: tuple[type[Any], ...] = (
+    CartReport,
+    CartReportItem,
+    ComposeCartResult,
+    GeneratedRecipe,
+    GuardrailDecision,
+    IngredientStatus,
+    MatchResult,
+    MatchStatus,
+    NormalizedIngredient,
+    ScopeVerdict,
+    TurnFailure,
+    TurnFailureKind,
+    TurnIntent,
+)
+
+
+def _checkpoint_serde() -> JsonPlusSerializer:
+    """Return the explicit serializer allowlist for persisted agent state."""
+    return JsonPlusSerializer(allowed_msgpack_modules=_CHECKPOINTED_MSGPACK_TYPES)
+
 
 def build_graph() -> StateGraph[AgentState, CueContext]:
     """Build the agent's (uncompiled) chat loop.
@@ -94,6 +136,8 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     START -> route_turn --(recipe)--------------> generate_recipe
                  |                                      ^    |
                  +-------(photo)--> parse_recipe_photo --+    v
+                 |                                    schedule_title
+                 |                                            |
                  |                                    normalize_ingredients
                  |                                            |
                  |                                            v
@@ -126,9 +170,9 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     turn `generate_recipe` renders the already-parsed recipe rather than
     generating a second one - see `_render_parsed_photo`.
 
-    `generate_recipe -> normalize_ingredients -> confirm_checklist` are static
-    edges: there is no routing decision to make, every recipe turn produces a
-    checklist and every checklist is confirmed.
+    `generate_recipe -> schedule_title -> normalize_ingredients ->
+    confirm_checklist` are static edges: there is no routing decision to make,
+    every recipe turn produces a checklist and every checklist is confirmed.
 
     `confirm_checklist` is the graph's **only** interrupt, so a compiled graph
     without a checkpointer can run every branch except that pause. Checkout left
@@ -168,6 +212,7 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     )
     builder.add_node(ROUTE_TURN, route_turn)
     builder.add_node(GENERATE_RECIPE, generate_recipe_node)
+    builder.add_node(SCHEDULE_TITLE, schedule_title_node)
     builder.add_node(
         PARSE_RECIPE_PHOTO, parse_recipe_photo_node, retry_policy=NETWORK_RETRY
     )
@@ -183,7 +228,8 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_node(REFUSE, refuse_node)
     builder.add_edge(START, ROUTE_TURN)
     builder.add_edge(PARSE_RECIPE_PHOTO, GENERATE_RECIPE)
-    builder.add_edge(GENERATE_RECIPE, NORMALIZE_INGREDIENTS)
+    builder.add_edge(GENERATE_RECIPE, SCHEDULE_TITLE)
+    builder.add_edge(SCHEDULE_TITLE, NORMALIZE_INGREDIENTS)
     builder.add_edge(NORMALIZE_INGREDIENTS, CONFIRM_CHECKLIST)
     builder.add_node(COMPOSE_CART, compose_cart_node)
     builder.add_node(REPORT_CART, report_cart_node)
@@ -319,6 +365,7 @@ async def open_compiled_graph(
         # constructor's return type still says tuples. The cast states what the
         # kwargs already guarantee.
         checkpointer = AsyncPostgresSaver(
-            cast("AsyncConnectionPool[AsyncConnection[dict[str, Any]]]", pool)
+            cast("AsyncConnectionPool[AsyncConnection[dict[str, Any]]]", pool),
+            serde=_checkpoint_serde(),
         )
         yield build_graph().compile(checkpointer=checkpointer)

@@ -6,6 +6,7 @@ import pytest
 from app.instamart import client
 from app.instamart.exceptions import (
     InstamartAuthError,
+    InstamartCartReviewRequiredError,
     InstamartDomainError,
     InstamartTransportError,
 )
@@ -102,6 +103,25 @@ async def test_call_tool_raises_domain_error_on_is_error(
 
     with pytest.raises(InstamartDomainError, match="Item out of stock"):
         await client.call_tool("at_token", "search_products", {})
+
+
+async def test_call_tool_marks_an_adjusted_cart_as_review_required(
+    mock_instamart_tool_call: InstamartToolCallStub,
+) -> None:
+    mock_instamart_tool_call.configure_text_envelope(
+        {
+            "success": False,
+            "error": {
+                "message": (
+                    "Some items have limited stock and their quantities were "
+                    "adjusted. Please review your cart. Cart updated successfully."
+                )
+            },
+        }
+    )
+
+    with pytest.raises(InstamartCartReviewRequiredError, match="adjusted"):
+        await client.call_tool("at_token", "update_cart", {})
 
 
 async def test_call_tool_accepts_both_json_and_sse(

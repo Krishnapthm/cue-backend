@@ -26,6 +26,7 @@ from app.instamart.constants import (
 )
 from app.instamart.exceptions import (
     InstamartAuthError,
+    InstamartCartReviewRequiredError,
     InstamartDomainError,
     InstamartTransportError,
 )
@@ -127,6 +128,22 @@ def _envelope_error_message(envelope: dict[str, Any]) -> str | None:
             return message
     message = envelope.get("message")
     return message if isinstance(message, str) else None
+
+
+def _requires_cart_review(tool_name: str, message: str | None) -> bool:
+    """Return whether a failed update_cart response confirms a completed write.
+
+    Instamart currently reports stock-adjusted cart writes as ``success:
+    false`` while explicitly saying the cart was updated and must be reviewed.
+    Its error-code reference directs clients to classify failures by message
+    until stable symbolic codes ship, so this narrow acknowledgement is the
+    only response that is safe to recover from. Every other domain error stays
+    terminal.
+    """
+    if tool_name != "update_cart" or message is None:
+        return False
+    normalized = message.casefold()
+    return "cart updated successfully" in normalized and "review" in normalized
 
 
 async def call_tool(
@@ -233,6 +250,13 @@ async def call_tool(
 
     if envelope.get("success") is False:
         message = _envelope_error_message(envelope)
+        if _requires_cart_review(tool_name, message):
+            logger.info(
+                "Instamart tool %s adjusted stock after updating the cart; "
+                "the caller must read and present the server cart.",
+                tool_name,
+            )
+            raise InstamartCartReviewRequiredError(message)
         logger.warning("Instamart tool %s reported failure: %s", tool_name, message)
         raise InstamartDomainError(message)
 

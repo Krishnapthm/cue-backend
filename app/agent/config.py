@@ -28,6 +28,9 @@ class ModelRole(StrEnum):
     * `ORDER_STATUS` - turns an already-fetched tracking payload into one
       sentence. There is no reasoning to do, the output is short, and the user
       is waiting, so the cheapest fast model wins outright.
+    * `TITLE` - condenses a resolved dish name into a short Recents label.
+      It is best-effort metadata, never part of the user's turn, so it uses a
+      cheap fast model with no reasoning effort.
 
     Deterministic nodes (`normalize_ingredients`, `select_variant`,
     `propose_substitute`, `report_cart`, `refuse`) take no model at all and
@@ -38,6 +41,7 @@ class ModelRole(StrEnum):
     RECIPE = "recipe"
     VISION = "vision"
     ORDER_STATUS = "order_status"
+    TITLE = "title"
 
 
 class ReasoningEffort(StrEnum):
@@ -111,6 +115,10 @@ class AgentSettings(BaseSettings):
     # node rewrites a structured payload the service layer already validated
     # into one sentence - the model is doing wording, not judgement.
     MODEL_ORDER_STATUS: str = "gpt-5.4-nano-2026-03-17"
+    # Session titling is a low-stakes 2-4 word summarisation job. Use the
+    # configured OpenAI provider's inexpensive, low-latency model; deployments
+    # can replace it with AGENT_MODEL_TITLE when product needs change.
+    MODEL_TITLE: str = "gpt-4o-mini"
     # The router emits a four-way label from an explicit rubric; reasoning
     # tokens buy nothing there and are billed at output rates.
     MODEL_ROUTER_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
@@ -171,6 +179,11 @@ class AgentSettings(BaseSettings):
                     model_id=self.MODEL_ORDER_STATUS,
                     reasoning_effort=self.MODEL_ORDER_STATUS_REASONING_EFFORT,
                 )
+            case ModelRole.TITLE:
+                # gpt-4o-mini does not support the reasoning_effort request
+                # argument. Passing even "none" makes OpenAI reject title
+                # generation with HTTP 400.
+                return ModelChoice(model_id=self.MODEL_TITLE)
 
 
 @lru_cache

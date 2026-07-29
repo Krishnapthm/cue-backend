@@ -40,3 +40,13 @@ class InstamartDomainError(AppError):
 
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
     detail = "Swiggy Instamart could not complete the request."
+
+
+class InstamartCartReviewRequiredError(InstamartDomainError):
+    """Instamart updated the cart but requires user review before checkout.
+
+    This is a documented-as-error response shape that the live Instamart
+    service uses when it adjusts quantities for limited stock. The write has
+    already happened, so callers must read the server cart and present it to
+    the user. They must not retry the write or continue to checkout.
+    """

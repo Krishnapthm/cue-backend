@@ -113,3 +113,6 @@ class AgentState(TypedDict):
     compose_result: NotRequired[ComposeCartResult | None]
     cart_report: NotRequired[CartReport | None]
     failure: NotRequired[TurnFailure | None]
+    # Set as soon as the best-effort title task is scheduled. It is persisted
+    # with the session's graph state so later turns never re-derive the title.
+    title_attempted: NotRequired[bool]
