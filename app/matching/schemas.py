@@ -11,6 +11,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
+from app.instamart.schemas import ProductRating
+
 
 class SubstitutionResult(BaseModel):
     """A proposed alternative variant for an out-of-stock preferred item.
@@ -25,4 +27,6 @@ class SubstitutionResult(BaseModel):
     pack_size: str | None
     unit_price: Decimal
     quantity: int
+    image_url: str | None = None
+    rating: ProductRating | None = None
     reason: str = Field(max_length=1000)

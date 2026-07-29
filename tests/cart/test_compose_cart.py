@@ -95,6 +95,39 @@ async def test_compose_cart_writes_the_full_cart_and_reads_it_back(
     assert tool_names == ["update_cart", "get_cart"]
 
 
+async def test_compose_cart_reads_back_an_adjusted_cart_for_user_review(
+    db_session: AsyncSession,
+    linked_user: User,
+    chat_session: ChatSession,
+    mock_instamart_tool_call: InstamartToolCallStub,
+) -> None:
+    mock_instamart_tool_call.configure_text_envelope(
+        {
+            "success": False,
+            "error": {
+                "message": (
+                    "Some items have limited stock and their quantities were "
+                    "adjusted. Please review your cart. Cart updated successfully."
+                )
+            },
+        },
+        tool_name="update_cart",
+    )
+    mock_instamart_tool_call.configure_tool_result(
+        "get_cart", {"structuredContent": RAW_CART}
+    )
+
+    result = await compose_cart(
+        db_session, linked_user.id, chat_session.id, "addr-1", [_variant()]
+    )
+
+    assert result.cart is not None
+    assert result.cart.total == Decimal("120.00")
+    assert [
+        call[1]["json"]["params"]["name"] for call in mock_instamart_tool_call.calls
+    ] == ["update_cart", "get_cart"]
+
+
 async def test_compose_cart_never_calls_update_cart_below_the_minimum(
     db_session: AsyncSession,
     linked_user: User,

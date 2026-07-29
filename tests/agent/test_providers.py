@@ -74,11 +74,13 @@ def test_each_role_resolves_to_its_own_configured_model() -> None:
         MODEL_ROUTER="router-model",
         MODEL_RECIPE="recipe-model",
         MODEL_VISION="vision-model",
+        MODEL_TITLE="title-model",
     )
 
     assert settings.model_for(ModelRole.ROUTER).model_id == "router-model"
     assert settings.model_for(ModelRole.RECIPE).model_id == "recipe-model"
     assert settings.model_for(ModelRole.VISION).model_id == "vision-model"
+    assert settings.model_for(ModelRole.TITLE).model_id == "title-model"
 
 
 @pytest.mark.parametrize(
@@ -87,6 +89,7 @@ def test_each_role_resolves_to_its_own_configured_model() -> None:
         (ModelRole.ROUTER, "AGENT_MODEL_ROUTER", "model_name"),
         (ModelRole.RECIPE, "AGENT_MODEL_RECIPE", "model_name"),
         (ModelRole.VISION, "AGENT_MODEL_VISION", "model_name"),
+        (ModelRole.TITLE, "AGENT_MODEL_TITLE", "model_name"),
     ],
 )
 def test_every_role_is_overridable_by_env_var(
@@ -132,6 +135,14 @@ def test_roles_without_the_effort_dial_send_no_effort_kwarg() -> None:
         assert model.reasoning_effort is None
 
 
+def test_the_title_role_uses_the_default_openai_provider() -> None:
+    model = get_chat_model(ModelRole.TITLE, _settings())
+
+    assert isinstance(model, ChatOpenAI)
+    assert model.model_name == "gpt-4o-mini"
+    assert _settings().model_for(ModelRole.TITLE).reasoning_effort is None
+
+
 def test_an_unknown_reasoning_effort_fails_at_config_load() -> None:
     # A typo must fail loudly at startup, not silently on a live turn.
     with pytest.raises(ValueError, match="MODEL_ROUTER_REASONING_EFFORT"):
@@ -160,7 +171,7 @@ def test_no_node_hard_codes_a_model_id_or_an_effort(node_file: Path) -> None:
     # and never an effort, which belongs on the same settings-driven path.
     model_ids = {
         str(AgentSettings.model_fields[field].default)
-        for field in ("MODEL_ROUTER", "MODEL_RECIPE", "MODEL_VISION")
+        for field in ("MODEL_ROUTER", "MODEL_RECIPE", "MODEL_VISION", "MODEL_TITLE")
     }
     literals = _string_constants(node_file)
 

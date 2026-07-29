@@ -71,6 +71,8 @@ def _as_selected_variant(
         product_name=match.product_name,
         pack_size=match.pack_size,
         unit_price=match.unit_price,
+        image_url=match.image_url,
+        rating=match.rating,
         quantity=match.quantity,
         selection_reason=match.selection_reason or UNRECORDED_SELECTION_REASON,
     )
@@ -146,6 +148,8 @@ def _report_item(match: MatchResult, line: CartLineItem | None) -> CartReportIte
         pack_size=match.pack_size,
         quantity=line.quantity if line is not None else match.quantity,
         unit_price=match.unit_price,
+        image_url=match.image_url,
+        rating=match.rating,
         line_total=line.price if line is not None else None,
         substitution_reason=match.substitution_reason,
     )

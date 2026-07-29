@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import RetryPolicy
@@ -38,7 +39,24 @@ from app.agent.nodes.scratch_choice import (
     choose_scratch_component,
     find_scratch_component,
 )
+from app.agent.nodes.title import schedule_title_node
+from app.agent.schemas import (
+    CartReport,
+    CartReportItem,
+    GeneratedRecipe,
+    GuardrailDecision,
+    IngredientStatus,
+    MatchResult,
+    NormalizedIngredient,
+    ScopeVerdict,
+    ScratchChoice,
+    ScratchComponent,
+    TurnFailure,
+    TurnFailureKind,
+    TurnIntent,
+)
 from app.agent.state import AgentState
+from app.cart.schemas import ComposeCartResult, MatchStatus
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -50,6 +68,7 @@ CueGraph = CompiledStateGraph[AgentState, CueContext]
 
 ROUTE_TURN = "route_turn"
 GENERATE_RECIPE = "generate_recipe"
+SCHEDULE_TITLE = "schedule_title"
 PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
 NORMALIZE_INGREDIENTS = "normalize_ingredients"
@@ -92,6 +111,33 @@ PROSE_NODES: frozenset[str] = frozenset({ORDER_STATUS})
 #: through; see `match_ingredient`.
 NETWORK_RETRY = RetryPolicy(max_attempts=3)
 
+# LangGraph will otherwise allow these application-owned checkpoint values only
+# in permissive mode and warn on every recovery. Keeping this explicit makes
+# strict MsgPack safe to enable and prevents a future LangGraph release from
+# turning a resumed chat into a failed request.
+_CHECKPOINTED_MSGPACK_TYPES: tuple[type[Any], ...] = (
+    CartReport,
+    CartReportItem,
+    ComposeCartResult,
+    GeneratedRecipe,
+    GuardrailDecision,
+    IngredientStatus,
+    MatchResult,
+    MatchStatus,
+    NormalizedIngredient,
+    ScopeVerdict,
+    ScratchChoice,
+    ScratchComponent,
+    TurnFailure,
+    TurnFailureKind,
+    TurnIntent,
+)
+
+
+def _checkpoint_serde() -> JsonPlusSerializer:
+    """Return the explicit serializer allowlist for persisted agent state."""
+    return JsonPlusSerializer(allowed_msgpack_modules=_CHECKPOINTED_MSGPACK_TYPES)
+
 
 def build_graph() -> StateGraph[AgentState, CueContext]:
     """Build the agent's (uncompiled) chat loop.
@@ -100,11 +146,13 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     START -> route_turn --(recipe)--------------> generate_recipe
                  |                                      ^    |
                  +-------(photo)--> parse_recipe_photo --+    v
+                 |                                    schedule_title
+                 |                                            |
                  |                              find_scratch_component
-                 |                                        |
+                 |                                            |
                  |                              choose_scratch_component
-                 |                                   (may pause)
-                 |                                        |
+                 |                                      (may pause)
+                 |                                            |
                  |                                    normalize_ingredients
                  |                                            |
                  |                                            v
@@ -137,10 +185,11 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     turn `generate_recipe` renders the already-parsed recipe rather than
     generating a second one - see `_render_parsed_photo`.
 
-    The recipe path is static through ready-made discovery and the optional
-    scratch choice, then normalization and checklist confirmation. Discovery
-    verifies availability against the selected address before it permits the
-    choice card; a recipe with no verified component simply carries on.
+    The recipe path is static through title scheduling, ready-made discovery,
+    the optional scratch choice, normalization, and checklist confirmation.
+    Discovery verifies availability against the selected address before it
+    permits the choice card; a recipe with no verified component simply
+    carries on.
 
     The scratch choice and `confirm_checklist` are both interrupts, so a
     compiled graph needs a checkpointer for every recipe turn. Checkout left
@@ -180,6 +229,7 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     )
     builder.add_node(ROUTE_TURN, route_turn)
     builder.add_node(GENERATE_RECIPE, generate_recipe_node)
+    builder.add_node(SCHEDULE_TITLE, schedule_title_node)
     builder.add_node(
         PARSE_RECIPE_PHOTO, parse_recipe_photo_node, retry_policy=NETWORK_RETRY
     )
@@ -197,7 +247,8 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_node(REFUSE, refuse_node)
     builder.add_edge(START, ROUTE_TURN)
     builder.add_edge(PARSE_RECIPE_PHOTO, GENERATE_RECIPE)
-    builder.add_edge(GENERATE_RECIPE, FIND_SCRATCH_COMPONENT)
+    builder.add_edge(GENERATE_RECIPE, SCHEDULE_TITLE)
+    builder.add_edge(SCHEDULE_TITLE, FIND_SCRATCH_COMPONENT)
     builder.add_edge(FIND_SCRATCH_COMPONENT, CHOOSE_SCRATCH_COMPONENT)
     builder.add_edge(CHOOSE_SCRATCH_COMPONENT, NORMALIZE_INGREDIENTS)
     builder.add_edge(NORMALIZE_INGREDIENTS, CONFIRM_CHECKLIST)
@@ -335,6 +386,7 @@ async def open_compiled_graph(
         # constructor's return type still says tuples. The cast states what the
         # kwargs already guarantee.
         checkpointer = AsyncPostgresSaver(
-            cast("AsyncConnectionPool[AsyncConnection[dict[str, Any]]]", pool)
+            cast("AsyncConnectionPool[AsyncConnection[dict[str, Any]]]", pool),
+            serde=_checkpoint_serde(),
         )
         yield build_graph().compile(checkpointer=checkpointer)

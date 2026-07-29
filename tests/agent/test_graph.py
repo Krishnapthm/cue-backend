@@ -27,6 +27,7 @@ from app.agent.exceptions import RecipeGenerationError
 from app.agent.nodes import order_status as order_status_module
 from app.agent.nodes import recipe as recipe_module
 from app.agent.nodes import route as route_module
+from app.agent.nodes import title as title_module
 from app.agent.nodes.guardrail import REFUSAL_MESSAGE
 from app.agent.nodes.order_status import NO_ORDERS_MESSAGE
 from app.agent.schemas import (
@@ -117,6 +118,9 @@ def empty_pantry(monkeypatch: pytest.MonkeyPatch) -> None:
         return set()
 
     monkeypatch.setattr(pantry_service, "stocked_names", _none)
+    monkeypatch.setattr(
+        title_module, "_schedule_title_generation", lambda _session_id, _dish_name: None
+    )
 
 
 @pytest.fixture
@@ -222,9 +226,12 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
     assert {
         "route_turn",
         "generate_recipe",
+        "schedule_title",
         "parse_recipe_photo",
         "order_status",
         "normalize_ingredients",
+        "find_scratch_component",
+        "choose_scratch_component",
         "refuse",
     } <= set(drawable.nodes)
     edges = {(e.source, e.target) for e in drawable.edges}
@@ -237,13 +244,13 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
 
 
 def test_the_recipe_branch_runs_through_the_checklist() -> None:
-    # A recipe turn always produces a checklist and every checklist is
-    # confirmed, so these are static edges and `generate_recipe` no longer ends
-    # the turn on its own.
+    # A recipe turn schedules a title, offers any verified ready-made
+    # component, then always produces and confirms a checklist.
     drawable = graph_module.build_graph().compile().get_graph()
 
     edges = {(e.source, e.target) for e in drawable.edges}
-    assert ("generate_recipe", "find_scratch_component") in edges
+    assert ("generate_recipe", "schedule_title") in edges
+    assert ("schedule_title", "find_scratch_component") in edges
     assert ("find_scratch_component", "choose_scratch_component") in edges
     assert ("choose_scratch_component", "normalize_ingredients") in edges
     assert ("normalize_ingredients", "confirm_checklist") in edges

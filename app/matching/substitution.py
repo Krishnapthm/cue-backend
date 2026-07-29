@@ -283,6 +283,8 @@ async def propose_substitute(
         product_name=product_name,
         pack_size=best_variant.pack_size,
         unit_price=best_price,
+        image_url=best_variant.image_url,
+        rating=best_variant.rating,
         quantity=preferred_quantity,
         reason=_describe_substitution(
             ingredient_name, preferred_pack_size, product_name, best_variant.pack_size

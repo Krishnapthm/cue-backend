@@ -99,8 +99,29 @@ async def test_get_cart_returns_the_server_cart(
 
     assert response.status_code == 200
     assert response.json()["items"] == [
-        {"spinId": "spin-1", "quantity": 2, "price": "100.00", "productName": None}
+        {
+            "spinId": "spin-1",
+            "quantity": 2,
+            "price": "100.00",
+            "productName": None,
+            "imageUrl": None,
+            "rating": None,
+        }
     ]
+
+
+async def test_get_cart_preserves_rating_object_from_the_server_cart(
+    authed_client: httpx.AsyncClient, fake_instamart: FakeInstamart
+) -> None:
+    fake_instamart.items = {"spin-1": 2}
+    fake_instamart.metadata = {
+        "spin-1": {"rating": {"value": "4.6", "count": "9.8k"}}
+    }
+
+    response = await authed_client.get("/cart")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["rating"] == {"value": "4.6", "count": "9.8k"}
 
 
 async def test_get_empty_cart_is_not_an_error(

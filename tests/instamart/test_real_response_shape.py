@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.instamart import client, service
 from app.instamart.exceptions import InstamartDomainError
+from app.instamart.schemas import Cart
 from app.models.user import User
 from tests.conftest import InstamartToolCallStub
 
@@ -49,6 +50,8 @@ REAL_SEARCH_DATA = {
                         "unitLevelPrice": "8/100 g",
                     },
                     "isInStockAndAvailable": True,
+                    "imageUrl": "https://media-assets.swiggy.com/swiggy/image/upload/sugar.png",
+                    "rating": {"value": "4.5", "count": "51.5k"},
                     "vegClassifier": "VEG_CLASSIFIER_VEG",
                 }
             ],
@@ -66,6 +69,7 @@ REAL_SEARCH_DATA = {
                     "quantityDescription": "1 kg x 2",
                     "price": {"mrp": 320, "offerPrice": 240},
                     "isInStockAndAvailable": True,
+                    "imageUrl": "https://media-assets.swiggy.com/swiggy/image/upload/two-kg.png",
                 },
                 {
                     "spinId": "P7NDAXSABN",
@@ -193,9 +197,49 @@ async def test_search_products_parses_the_real_shape_end_to_end(
     ]
     assert first.variants[0].pack_size == "1 kg"
     assert first.variants[0].in_stock is True
+    assert first.variants[0].image_url == (
+        "https://media-assets.swiggy.com/swiggy/image/upload/sugar.png"
+    )
+    assert first.variants[0].rating is not None
+    assert first.variants[0].rating.value == "4.5"
+    assert first.variants[0].rating.count == "51.5k"
     # `offerPrice` is what the user actually pays, so it wins over `mrp`.
     assert second.variants[0].price == Decimal("240")
     assert second.variants[1].price == Decimal("123")
+    # The first variation has only an image, while the second has neither.
+    # Both are normal optional cases in the observed search payload.
+    assert second.variants[0].image_url == (
+        "https://media-assets.swiggy.com/swiggy/image/upload/two-kg.png"
+    )
+    assert second.variants[0].rating is None
+    assert second.variants[1].image_url is None
+    assert second.variants[1].rating is None
+
+
+def test_cart_line_items_preserve_optional_variant_metadata() -> None:
+    """Cart endpoint models expose metadata when Swiggy includes it."""
+    both = {
+        "spinId": "both",
+        "quantity": 1,
+        "imageUrl": "https://media-assets.swiggy.com/swiggy/image/upload/both.png",
+        "rating": {"value": "4.6", "count": "9.8k"},
+    }
+    only_image = {
+        "spinId": "only-image",
+        "quantity": 1,
+        "imageUrl": "https://media-assets.swiggy.com/swiggy/image/upload/image.png",
+    }
+    neither = {"spinId": "neither", "quantity": 1}
+
+    cart = Cart.model_validate({"items": [both, only_image, neither]})
+
+    assert cart.items[0].rating is not None
+    assert cart.items[0].rating.value == "4.6"
+    assert cart.items[0].rating.count == "9.8k"
+    assert cart.items[1].image_url == only_image["imageUrl"]
+    assert cart.items[1].rating is None
+    assert cart.items[2].image_url is None
+    assert cart.items[2].rating is None
 
 
 async def test_get_go_to_items_parses_the_real_shape_end_to_end(

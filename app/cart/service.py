@@ -55,7 +55,10 @@ from app.cart.schemas import (
 )
 from app.cart.units import normalize_quantity, parse_pack_size
 from app.instamart import service as instamart_service
-from app.instamart.exceptions import InstamartDomainError
+from app.instamart.exceptions import (
+    InstamartCartReviewRequiredError,
+    InstamartDomainError,
+)
 from app.instamart.schemas import (
     Cart,
     CartItemInput,
@@ -119,6 +122,8 @@ def select_variant(
         product_name=product.name,
         pack_size=variant.pack_size,
         unit_price=variant.price,
+        image_url=variant.image_url,
+        rating=variant.rating,
         quantity=pack_count,
         overage=overage,
         selection_reason=reason,
@@ -261,9 +266,19 @@ async def compose_cart(
         CartItemInput(spin_id=spin_id, quantity=quantity)
         for spin_id, quantity, _ in purchasable
     ]
-    await instamart_service.update_cart(
-        session, user_id, address_id=address_id, items=items
-    )
+    try:
+        await instamart_service.update_cart(
+            session, user_id, address_id=address_id, items=items
+        )
+    except InstamartCartReviewRequiredError as exc:
+        # The write succeeded with stock-adjusted quantities. The cart read
+        # below is the source of truth the report renders, and the graph ends
+        # at that report - never checkout - so the user can review it first.
+        logger.info(
+            "Instamart adjusted cart quantities for session %s: %s",
+            chat_session_id,
+            exc.detail,
+        )
     cart = await instamart_service.get_cart(session, user_id)
 
     return ComposeCartResult(
