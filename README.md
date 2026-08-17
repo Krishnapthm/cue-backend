@@ -1,25 +1,17 @@
 # Cue backend
 
-Cue backend is an agent harness. It turns a sentence such as "I want to cook
-palak paneer for four people" into a verified Swiggy Instamart cart, and then
-into a placed order.
-
-The language model is one part of this repository. The rest is the harness:
-the tools the model may call, the state it keeps, the points where it stops
-and asks the user, and the traces that show what it did.
+Cue backend is an agent harness for one narrow task: groceries. It turns a
+sentence such as "I want to cook biryani for four people" into a verified
+Swiggy Instamart cart, and then into a placed order. A tap on an NFC tag
+restocks one container, on a separate path that runs no model at all.
 
 Status: this is a working prototype and a portfolio piece. It is not a
 released package, and it has no public deployment. See
 [Limitations](#limitations).
 
-## Agent = model + harness
+## The harness
 
-An agent harness is the software layer around a model that lets the model act.
-It supplies tools, memory, guardrails, human checkpoints, and observability.
-The model supplies the reasoning. This repository holds the harness for one
-narrow task: recipe to groceries.
-
-| Harness concern | Where it lives in this repository |
+| Concern | Where it lives in this repository |
 |---|---|
 | Tools | `app/instamart/` wraps 11 Swiggy Instamart MCP tools |
 | Control flow | `app/agent/graph.py` builds a LangGraph state graph |
@@ -31,7 +23,7 @@ narrow task: recipe to groceries.
 | Transport | A FastAPI service streams each turn to the mobile client |
 
 The [architecture guide](docs/architecture.md) explains each row, and explains
-why the harness makes these decisions instead of the model.
+why these decisions belong to the harness rather than to the model.
 
 ## Quickstart
 
@@ -60,13 +52,13 @@ The interactive API documentation is at `http://127.0.0.1:8000/docs` in the
 For the full first run, which includes a Swiggy account link and a real chat
 turn, read [Getting started](docs/getting-started.md).
 
-## What the harness does in one turn
+## One recipe turn
 
 1. The client opens `GET /chat/sessions/{id}/stream` with the user's message.
 2. `route_turn` classifies the turn: recipe, photo, order status, or refusal.
 3. `generate_recipe` produces a structured recipe with a fixed schema.
 4. `find_scratch_component` looks for one ready-made alternative, such as a
-   sauce base, and asks the user to choose. This is the first pause.
+   biryani masala, and asks the user to choose. This is the first pause.
 5. `normalize_ingredients` reshapes the recipe into have and need rows, and
    pre-ticks the staples that the user's pantry already holds.
 6. `confirm_checklist` shows the checklist and pauses. This is the second
@@ -80,6 +72,32 @@ Checkout is not in the graph, so no operation that spends money sits behind a
 model decision. `app/cart/checkout.py` holds that logic as a service. No HTTP
 route exposes it yet.
 
+## NFC pantry restock
+
+The second way into a cart skips the agent completely. The user sticks an NFC
+tag on a container and writes a slug on it, for example `basmati-rice`. A tap
+sends the tag id, the slug, and the delivery address to
+`POST /pantry/tags/resolve`, and the service answers with an orderable
+Instamart variant while the jar is still in the user's hand.
+
+- Resolution is search and rank, never a model call. Nothing in `app/tags/`
+  imports `app/agent/`.
+- Ranking prefers the brands the user already buys, which the service reads
+  from Swiggy's go-to items, over raw search order.
+- The winner is stored as the tag's binding, so the next tap answers from the
+  binding. A relabelled sticker invalidates the old binding.
+- A resolved tap links to the matching pantry item, so a restock and the
+  pantry stay one record.
+- `POST /pantry/tags/resolve-batch` answers a finished scan in one request. It
+  accepts up to 50 taps, runs at most 5 searches at once, and returns a
+  per-tap outcome of `cached`, `bound`, or `unresolved`. One slug with no
+  product never fails the other nine.
+- Every read and write is scoped by user, so one household's sticker cannot
+  resolve against another's binding.
+
+The [pantry](docs/reference/api.md#pantry) and
+[tags](docs/reference/api.md#tags-nfc) endpoints hold the contracts.
+
 ## Documentation
 
 | Page | Purpose |
@@ -91,7 +109,6 @@ route exposes it yet.
 | [Configuration reference](docs/reference/configuration.md) | Every environment variable |
 | [Add a graph node](docs/guides/add-a-graph-node.md) | Extend the agent safely |
 | [Link a Swiggy account](docs/guides/link-a-swiggy-account.md) | Complete the OAuth flow |
-| [Contributing](CONTRIBUTING.md) | Set up, test, and submit a change |
 | [Changelog](CHANGELOG.md) | What changed, and when |
 
 ## Repository map
@@ -165,10 +182,15 @@ The documentation states only what the code does. These points are true today:
 - No test calls a real model. The suite removes the provider API keys.
 - The repository contains the backend only. The Expo client is not here.
 
+## Code owners
+
+`.github/CODEOWNERS` names the reviewer for every path. GitHub requests that
+review automatically on each pull request.
+
+| Path | Owner |
+|---|---|
+| `*` | [@Krishnapthm](https://github.com/Krishnapthm) |
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## Credits
-
-Cue is built by [Krishnapthm](https://github.com/Krishnapthm).

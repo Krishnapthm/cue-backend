@@ -66,6 +66,8 @@ describes the state of `main` since the first commit.
 - **LangSmith tracing**, and `scripts/agent_smoke.py`, which proves that a run
   is queryable rather than merely visible.
 - **An MIT license**, in `LICENSE`.
+- **Code owners**, in `.github/CODEOWNERS`, so GitHub requests a review on
+  every pull request.
 - **Documentation.** A README that frames the repository as an agent harness,
   a getting-started tutorial, an architecture explanation, three reference
   pages, two how-to guides, and this changelog.

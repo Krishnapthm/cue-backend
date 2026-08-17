@@ -7,7 +7,7 @@ read the [reference pages](reference/api.md).
 
 ## The problem the harness solves
 
-A user says "I want to cook palak paneer for four people". A language model can
+A user says "I want to cook biryani for four people". A language model can
 write that recipe. It cannot buy the ingredients.
 
 The distance between those two facts is the whole system:

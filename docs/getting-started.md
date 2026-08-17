@@ -174,7 +174,7 @@ Stream the turn with `curl -N`, which keeps the connection open:
 
 ```bash
 curl -N -H "Authorization: Bearer $TOKEN" \
-  "http://127.0.0.1:8000/chat/sessions/$SESSION/stream?message=I%20want%20to%20cook%20palak%20paneer%20for%204"
+  "http://127.0.0.1:8000/chat/sessions/$SESSION/stream?message=I%20want%20to%20cook%20biryani%20for%204"
 ```
 
 The stream sends named events as the work happens:

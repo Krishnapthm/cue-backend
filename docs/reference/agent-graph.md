@@ -175,9 +175,9 @@ Payload, from `ScratchChoiceInterrupt`:
 ```json
 {
   "ui": "scratch_choice",
-  "dish_name": "Palak paneer",
-  "component_name": "paneer",
-  "ready_made_name": "Amul Fresh Paneer 200 g",
+  "dish_name": "Chicken biryani",
+  "component_name": "biryani masala",
+  "ready_made_name": "Everest Biryani Masala 50 g",
   "options": [
     {"id": "ready_made", "label": "..."},
     {"id": "from_scratch", "label": "..."}
