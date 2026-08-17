@@ -5,7 +5,7 @@ sentence such as "I want to cook biryani for four people" into a verified
 Swiggy Instamart cart, and then into a placed order. A tap on an NFC tag
 restocks one container, on a separate path that runs no model at all.
 
-Status: this is a working prototype and a portfolio piece. It is not a
+Status: this is a working prototype. It is not a
 released package, and it has no public deployment. See
 [Limitations](#limitations).
 
@@ -181,15 +181,6 @@ The documentation states only what the code does. These points are true today:
   must run Docker to run the tests.
 - No test calls a real model. The suite removes the provider API keys.
 - The repository contains the backend only. The Expo client is not here.
-
-## Code owners
-
-`.github/CODEOWNERS` names the reviewer for every path. GitHub requests that
-review automatically on each pull request.
-
-| Path | Owner |
-|---|---|
-| `*` | [@Krishnapthm](https://github.com/Krishnapthm) |
 
 ## License
 
