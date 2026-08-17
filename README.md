@@ -163,8 +163,11 @@ The documentation states only what the code does. These points are true today:
 - The test suite starts a real Postgres container with testcontainers. You
   must run Docker to run the tests.
 - No test calls a real model. The suite removes the provider API keys.
-- The repository has no license file. Read the terms before you reuse it.
 - The repository contains the backend only. The Expo client is not here.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## Credits
 
