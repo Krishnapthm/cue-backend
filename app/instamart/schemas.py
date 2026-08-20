@@ -201,7 +201,19 @@ class CartLineItem(BaseModel):
     spin_id: str = Field(alias="spinId")
     quantity: int
     price: Decimal | None = None
-    product_name: str | None = Field(default=None, alias="productName")
+    # Swiggy spells the line's name differently in different payloads -
+    # `search_products` alone answers with `displayName` where the cart docs say
+    # `productName` - and a line that parses unnamed reaches the user as a
+    # placeholder word. Accept every spelling seen rather than one of them.
+    product_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "productName", "displayName", "product_name", "name", "itemName"
+        ),
+        # Kept explicitly: the response the app parses is camelCase, and a
+        # validation alias alone would serialize this back out as `product_name`.
+        serialization_alias="productName",
+    )
     image_url: str | None = Field(default=None, alias="imageUrl")
     rating: ProductRating | None = None
 

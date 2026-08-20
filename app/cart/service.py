@@ -39,7 +39,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cart.constants import DROPPED_BY_SWIGGY_REASON, MINIMUM_ORDER_VALUE
@@ -67,6 +67,8 @@ from app.instamart.schemas import (
     ProductVariant,
 )
 from app.models.cart import CartPlan, CartPlanItem
+from app.models.chat import ChatSession
+from app.models.tag import TagBinding
 
 logger = logging.getLogger(__name__)
 
@@ -397,9 +399,84 @@ def _dropped(
     ]
 
 
+async def _known_names(
+    session: AsyncSession, user_id: int, spin_ids: set[str]
+) -> dict[str, str]:
+    """Look up product names for `spin_ids` in the user's own records.
+
+    Two places already hold a name against a `spin_id`, both written by us:
+    the pantry sticker a restock came from, and the cart plan a chat composed.
+    The sticker wins when both know a line - it is the name the user chose to
+    put on the jar.
+    """
+    names: dict[str, str] = {}
+
+    plan_items = await session.execute(
+        select(CartPlanItem.spin_id, CartPlanItem.product_name)
+        .join(CartPlan, CartPlan.id == CartPlanItem.plan_id)
+        .join(ChatSession, ChatSession.id == CartPlan.session_id)
+        .where(
+            ChatSession.user_id == user_id,
+            CartPlanItem.spin_id.in_(spin_ids),
+            CartPlanItem.product_name.is_not(None),
+        )
+        # Newest first: a re-composed plan renamed nothing, but a variant that
+        # was resolved again more recently is the better description of it.
+        .order_by(CartPlanItem.id.desc())
+    )
+    for spin_id, product_name in plan_items:
+        if spin_id is not None:
+            names.setdefault(spin_id, product_name)
+
+    bindings = await session.execute(
+        select(TagBinding.spin_id, TagBinding.product_name).where(
+            TagBinding.user_id == user_id,
+            TagBinding.spin_id.in_(spin_ids),
+            TagBinding.product_name.is_not(None),
+        )
+    )
+    for spin_id, product_name in bindings:
+        names[spin_id] = product_name
+
+    return names
+
+
+async def _named(session: AsyncSession, user_id: int, cart: Cart) -> Cart:
+    """Fill in product names for the lines Swiggy answered with unnamed.
+
+    A cart read is the only view the app has of lines it did not write itself -
+    a chat composes its cart server-side - and Swiggy does not reliably name
+    the lines it returns. An unnamed line reaches the user as a placeholder
+    word where a product should be, in the one screen whose whole job is to
+    agree with their real Instamart cart.
+
+    Display only: Swiggy stays the sole authority on which lines are in the
+    cart and how many of each. This never adds, drops or re-quantifies a line.
+    """
+    unnamed = {line.spin_id for line in cart.items if not line.product_name}
+    if not unnamed:
+        return cart
+
+    names = await _known_names(session, user_id, unnamed)
+    if not names:
+        return cart
+
+    return cart.model_copy(
+        update={
+            "items": [
+                line
+                if line.product_name or line.spin_id not in names
+                else line.model_copy(update={"product_name": names[line.spin_id]})
+                for line in cart.items
+            ]
+        }
+    )
+
+
 async def get_cart(session: AsyncSession, user_id: int) -> Cart:
-    """Return the user's current Swiggy server cart (R5.2)."""
-    return await instamart_service.get_cart(session, user_id)
+    """Return the user's current Swiggy server cart (R5.2), lines named."""
+    cart = await instamart_service.get_cart(session, user_id)
+    return await _named(session, user_id, cart)
 
 
 async def add_items(
@@ -449,7 +526,9 @@ async def add_items(
         rejected += _dropped(cart, items, {item.spin_id for item in rejected})
         rejected_ids = {item.spin_id for item in rejected}
         added = [item for item in items if item.spin_id not in rejected_ids]
-        return CartMutationResult(cart=cart, added=added, rejected=rejected)
+        return CartMutationResult(
+            cart=await _named(session, user_id, cart), added=added, rejected=rejected
+        )
 
 
 async def _add_individually(
@@ -537,7 +616,7 @@ async def set_item_quantity(
             # so report that one line rather than failing the request.
             cart = await instamart_service.get_cart(session, user_id)
             return CartMutationResult(
-                cart=cart,
+                cart=await _named(session, user_id, cart),
                 rejected=[
                     RejectedCartItem(
                         spin_id=spin_id, quantity=quantity, reason=exc.detail
@@ -547,7 +626,7 @@ async def set_item_quantity(
 
         rejected = _dropped(cart, [requested], set())
         return CartMutationResult(
-            cart=cart,
+            cart=await _named(session, user_id, cart),
             added=[] if rejected else [requested],
             rejected=rejected,
         )
@@ -577,4 +656,4 @@ async def remove_item(
         cart = await instamart_service.update_cart(
             session, user_id, address_id=address_id, items=remaining
         )
-        return CartMutationResult(cart=cart)
+        return CartMutationResult(cart=await _named(session, user_id, cart))
