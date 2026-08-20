@@ -73,8 +73,15 @@ class AgentState(TypedDict):
     stay valid without passing `guardrail=None`.
 
     `turn_intent` is `route_turn`'s verdict for the current turn: which of the
-    four entry paths it took. `guardrail` keeps the in-scope/out-of-scope
+    five entry paths it took. `guardrail` keeps the in-scope/out-of-scope
     framing for logs and traces; this is the branch that was actually run.
+
+    `active_step_index` is the 1-based step the user is looking at in cooking
+    mode, supplied per turn by the client. It is the signal that makes the
+    `COOKING_QUESTION` branch reachable at all, and like `image_object_path` it
+    comes from the boundary rather than from anything the user can type, so the
+    router cannot be talked into that path. `normalize`/`match`/`compose` never
+    read it - only `route_turn` and the cooking node do.
 
     `matches` is the ingredient fan-out's output, one row per ingredient. It
     **must** carry the `operator.add` reducer: the rows are written by
@@ -116,6 +123,7 @@ class AgentState(TypedDict):
     scratch_component: NotRequired[ScratchComponent | None]
     scratch_choice: NotRequired[ScratchChoice | None]
     turn_intent: NotRequired[TurnIntent]
+    active_step_index: NotRequired[int | None]
     matches: Annotated[NotRequired[list[MatchResult]], operator.add]
     cart_plan_id: NotRequired[int | None]
     compose_result: NotRequired[ComposeCartResult | None]

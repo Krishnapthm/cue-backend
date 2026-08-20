@@ -24,6 +24,7 @@ from app.agent.nodes.cart import (
     report_cart_node,
 )
 from app.agent.nodes.confirm_checklist import confirm_checklist
+from app.agent.nodes.cooking import answer_cooking_question
 from app.agent.nodes.guardrail import refuse_node
 from app.agent.nodes.match_ingredient import (
     MATCH_INGREDIENT,
@@ -72,6 +73,7 @@ GENERATE_RECIPE = "generate_recipe"
 SCHEDULE_TITLE = "schedule_title"
 PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
+ANSWER_COOKING_QUESTION = "answer_cooking_question"
 NORMALIZE_INGREDIENTS = "normalize_ingredients"
 FIND_SCRATCH_COMPONENT = "find_scratch_component"
 CHOOSE_SCRATCH_COMPONENT = "choose_scratch_component"
@@ -88,7 +90,13 @@ REFUSE = "refuse"
 #: denylist would leak all of that the first time someone added a node and
 #: forgot to update it; an allowlist stays silent until a node is declared
 #: safe to stream.
-PROSE_NODES: frozenset[str] = frozenset({ORDER_STATUS})
+#:
+#: `answer_cooking_question` is the second member. It qualifies on the same
+#: terms `order_status` does: it makes one plain model call with no
+#: `with_structured_output` schema whose JSON could leak, and its output is
+#: prose written to be read by the user. It is also the node that most needs
+#: streaming - the user is standing at the stove waiting for the answer.
+PROSE_NODES: frozenset[str] = frozenset({ORDER_STATUS, ANSWER_COOKING_QUESTION})
 
 #: Retry policy for the nodes that reach off-box - the recipe photo fetch and
 #: parse, the order-status lookup, and each ingredient worker. A transient
@@ -175,12 +183,20 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
                  |                                           END
                  +-------(order_status)-> order_status ------> END
                  |
+                 +--(cooking_question)-> answer_cooking_question -> END
+                 |
                  +-------(out_of_scope)-> refuse ------------> END
     ```
 
     Every turn enters through the router, which both labels the turn and
     picks its branch, so off-topic turns are turned away before any recipe
     model call.
+
+    The `cooking_question` branch is the one path the router can only take when
+    the turn is eligible for it - a step index from the client and a recipe
+    already on state. It exists so a question asked mid-cook does not enter the
+    recipe path and recompose the user's cart underneath them; it writes
+    nothing but `messages` and ends. See `app/agent/nodes/cooking.py`.
 
     The two intake paths converge: a photo turn joins the text path at
     `generate_recipe` and gets a checklist and a cart like any other. On that
@@ -236,6 +252,9 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
         PARSE_RECIPE_PHOTO, parse_recipe_photo_node, retry_policy=NETWORK_RETRY
     )
     builder.add_node(ORDER_STATUS, order_status_node, retry_policy=NETWORK_RETRY)
+    # No retry policy: this node reaches nothing off-box. The recipe and the
+    # transcript are already in state.
+    builder.add_node(ANSWER_COOKING_QUESTION, answer_cooking_question)
     builder.add_node(NORMALIZE_INGREDIENTS, normalize_ingredients_node)
     builder.add_node(FIND_SCRATCH_COMPONENT, find_scratch_component)
     builder.add_node(CHOOSE_SCRATCH_COMPONENT, choose_scratch_component)
@@ -263,6 +282,7 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_edge(COMPOSE_CART, REPORT_CART)
     builder.add_edge(REPORT_CART, END)
     builder.add_edge(ORDER_STATUS, END)
+    builder.add_edge(ANSWER_COOKING_QUESTION, END)
     builder.add_edge(REFUSE, END)
     return builder
 

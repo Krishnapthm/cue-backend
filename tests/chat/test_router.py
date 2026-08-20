@@ -1172,3 +1172,72 @@ async def test_a_photo_cart_turn_writes_the_same_recipe_card(
         "recipe",
     ]
     assert transcript["messages"][-1]["payload"]["ui"] == "recipe"
+
+
+async def test_step_index_on_a_posted_message_reaches_the_graph(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "is this brown enough?", "step_index": 2},
+    )
+
+    assert fake_agent.calls[-1].turn_state["active_step_index"] == 2
+
+
+async def test_a_posted_message_with_no_step_index_clears_it(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    assert fake_agent.calls[-1].turn_state["active_step_index"] is None
+
+
+async def test_a_zero_step_index_is_rejected_before_the_agent_runs(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "is this brown enough?", "step_index": 0},
+    )
+
+    assert response.status_code == 422
+    assert not fake_agent.calls
+
+
+async def test_step_index_is_not_persisted_on_the_message(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # It describes where the user is, not what they said, and the transcript
+    # records the latter.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "is this brown enough?", "step_index": 2},
+    )
+
+    user_message = response.json()["user_message"]
+    assert user_message["payload"] is None
+    assert "step_index" not in user_message

@@ -141,12 +141,19 @@ class TurnIntent(StrEnum):
     classifier that returns an unrecognized label must fail validation and be
     handled as malformed, never coerced into a path that spends a model call
     or touches the user's cart.
+
+    `COOKING_QUESTION` is the mid-cook path (CUE-120). It exists because the
+    alternative is worse than a missing feature: without it, "is this brown
+    enough?" is classified `RECIPE`, which regenerates the recipe, re-asks the
+    checklist and recomposes the cart - wiping the cooking session the user is
+    standing in front of.
     """
 
     OUT_OF_SCOPE = "out_of_scope"
     RECIPE = "recipe"
     PHOTO = "photo"
     ORDER_STATUS = "order_status"
+    COOKING_QUESTION = "cooking_question"
 
 
 class TurnClassification(BaseModel):

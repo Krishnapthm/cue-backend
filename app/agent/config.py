@@ -31,6 +31,12 @@ class ModelRole(StrEnum):
     * `TITLE` - condenses a resolved dish name into a short Recents label.
       It is best-effort metadata, never part of the user's turn, so it uses a
       cheap fast model with no reasoning effort.
+    * `COOKING` - answers a question from someone standing at the stove
+      ("can I use ghee instead?"). Unlike `ORDER_STATUS` this is not rewording
+      a payload we already validated: the answer is cooking judgement, it is
+      acted on immediately, and a wrong one ruins the dish the user has already
+      bought the ingredients for. That is worth the strong model, one call per
+      question.
 
     Deterministic nodes (`normalize_ingredients`, `select_variant`,
     `propose_substitute`, `report_cart`, `refuse`) take no model at all and
@@ -42,6 +48,7 @@ class ModelRole(StrEnum):
     VISION = "vision"
     ORDER_STATUS = "order_status"
     TITLE = "title"
+    COOKING = "cooking"
 
 
 class ReasoningEffort(StrEnum):
@@ -119,6 +126,10 @@ class AgentSettings(BaseSettings):
     # configured OpenAI provider's inexpensive, low-latency model; deployments
     # can replace it with AGENT_MODEL_TITLE when product needs change.
     MODEL_TITLE: str = "gpt-4o-mini"
+    # Cooking answers: luna, for the correctness reason `ModelRole.COOKING`
+    # gives. The user is waiting, but this node is on `PROSE_NODES` so its
+    # tokens stream - perceived latency is the first token, not the last.
+    MODEL_COOKING: str = "gpt-5.6-luna"
     # The router emits a four-way label from an explicit rubric; reasoning
     # tokens buy nothing there and are billed at output rates.
     MODEL_ROUTER_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
@@ -184,6 +195,10 @@ class AgentSettings(BaseSettings):
                 # argument. Passing even "none" makes OpenAI reject title
                 # generation with HTTP 400.
                 return ModelChoice(model_id=self.MODEL_TITLE)
+            case ModelRole.COOKING:
+                # luna does not offer the reasoning-effort dial, same as
+                # RECIPE and VISION.
+                return ModelChoice(model_id=self.MODEL_COOKING)
 
 
 @lru_cache

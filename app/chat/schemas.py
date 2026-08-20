@@ -120,12 +120,21 @@ class RecipeCardPayload(BaseModel):
 
 
 class CreateMessageRequest(BaseModel):
-    """A message to append to a chat session's transcript."""
+    """A message to append to a chat session's transcript.
+
+    `step_index` is the 1-based recipe step the user is looking at in cooking
+    mode, sent alongside the question they typed. It is what makes the
+    `cooking_question` turn path reachable (CUE-120) - a question asked mid-cook
+    otherwise enters the recipe path and recomposes the user's cart underneath
+    them. It is not persisted on the message: it describes where the user is,
+    not what they said, and the transcript records the latter.
+    """
 
     role: MessageRole
     kind: MessageKind = MessageKind.TEXT
     content: str | None = None
     payload: dict[str, Any] | None = None
+    step_index: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _validate_body(self) -> Self:

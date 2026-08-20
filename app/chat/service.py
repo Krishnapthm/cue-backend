@@ -331,12 +331,19 @@ def _turn_state(
     It is written on every turn, `None` included: the field survives in the
     checkpoint, so leaving a previous turn's path in place would route the next
     text turn back into the vision path and re-read a stale photo.
+
+    `active_step_index` is carried the same way and for the same reason
+    (CUE-120). It is what makes a turn eligible for the cooking path, and
+    leaving a previous turn's value in place would keep offering that path
+    after the user has closed cooking mode - so a turn sent without one clears
+    it rather than inheriting it.
     """
     return {
         "session_id": str(session_id),
         "user_id": user_id,
         "messages": [HumanMessage(content=request.content or "")],
         "image_object_path": request.image_object_path(),
+        "active_step_index": request.step_index,
     }
 
 
