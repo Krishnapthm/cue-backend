@@ -40,6 +40,7 @@ from app.agent.nodes.scratch_choice import (
     choose_scratch_component,
     find_scratch_component,
 )
+from app.agent.nodes.small_talk import small_talk_node
 from app.agent.nodes.title import schedule_title_node
 from app.agent.schemas import (
     CartReport,
@@ -74,6 +75,7 @@ SCHEDULE_TITLE = "schedule_title"
 PARSE_RECIPE_PHOTO = "parse_recipe_photo"
 ORDER_STATUS = "order_status"
 ANSWER_COOKING_QUESTION = "answer_cooking_question"
+SMALL_TALK = "small_talk"
 NORMALIZE_INGREDIENTS = "normalize_ingredients"
 FIND_SCRATCH_COMPONENT = "find_scratch_component"
 CHOOSE_SCRATCH_COMPONENT = "choose_scratch_component"
@@ -96,7 +98,12 @@ REFUSE = "refuse"
 #: `with_structured_output` schema whose JSON could leak, and its output is
 #: prose written to be read by the user. It is also the node that most needs
 #: streaming - the user is standing at the stove waiting for the answer.
-PROSE_NODES: frozenset[str] = frozenset({ORDER_STATUS, ANSWER_COOKING_QUESTION})
+#: `small_talk` is the third, on the same terms: one plain model call, no
+#: structured-output schema behind it, and a one-line reply written to be
+#: read.
+PROSE_NODES: frozenset[str] = frozenset(
+    {ORDER_STATUS, ANSWER_COOKING_QUESTION, SMALL_TALK}
+)
 
 #: Retry policy for the nodes that reach off-box - the recipe photo fetch and
 #: parse, the order-status lookup, and each ingredient worker. A transient
@@ -185,6 +192,8 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
                  |
                  +--(cooking_question)-> answer_cooking_question -> END
                  |
+                 +-------(small_talk)---> small_talk --------> END
+                 |
                  +-------(out_of_scope)-> refuse ------------> END
     ```
 
@@ -197,6 +206,11 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     already on state. It exists so a question asked mid-cook does not enter the
     recipe path and recompose the user's cart underneath them; it writes
     nothing but `messages` and ends. See `app/agent/nodes/cooking.py`.
+
+    The `small_talk` branch sits beside it and writes nothing but `messages`
+    too. It exists so a thank-you gets a thank-you's reply rather than the
+    refusal, which is the boundary for work Cue will not do - not for a user
+    being friendly. See `app/agent/nodes/small_talk.py`.
 
     The two intake paths converge: a photo turn joins the text path at
     `generate_recipe` and gets a checklist and a cart like any other. On that
@@ -255,6 +269,8 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     # No retry policy: this node reaches nothing off-box. The recipe and the
     # transcript are already in state.
     builder.add_node(ANSWER_COOKING_QUESTION, answer_cooking_question)
+    # No retry policy, for the same reason: one model call and nothing else.
+    builder.add_node(SMALL_TALK, small_talk_node)
     builder.add_node(NORMALIZE_INGREDIENTS, normalize_ingredients_node)
     builder.add_node(FIND_SCRATCH_COMPONENT, find_scratch_component)
     builder.add_node(CHOOSE_SCRATCH_COMPONENT, choose_scratch_component)
@@ -283,6 +299,7 @@ def build_graph() -> StateGraph[AgentState, CueContext]:
     builder.add_edge(REPORT_CART, END)
     builder.add_edge(ORDER_STATUS, END)
     builder.add_edge(ANSWER_COOKING_QUESTION, END)
+    builder.add_edge(SMALL_TALK, END)
     builder.add_edge(REFUSE, END)
     return builder
 

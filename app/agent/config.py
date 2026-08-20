@@ -19,7 +19,7 @@ class ModelRole(StrEnum):
     why one shared model id is no longer enough:
 
     * `ROUTER` - classification only, on every single turn. Cheap, and run at
-      no reasoning effort; the router's job is a four-way label, not thought.
+      no reasoning effort; the router's job is a one-word label, not thought.
     * `RECIPE` - decides correctness. A wrong ingredient list becomes a wrong
       cart and then a wrong order, and the error is invisible until the user
       is at the stove, so this role buys the strongest model in the system.
@@ -37,6 +37,10 @@ class ModelRole(StrEnum):
       acted on immediately, and a wrong one ruins the dish the user has already
       bought the ingredients for. That is worth the strong model, one call per
       question.
+    * `SMALL_TALK` - answers "thanks, that was delicious" in one short line.
+      The cheapest role in the system and deliberately so: there is no
+      judgement to make and nothing to get wrong except length, which the
+      prompt asks for and the node enforces.
 
     Deterministic nodes (`normalize_ingredients`, `select_variant`,
     `propose_substitute`, `report_cart`, `refuse`) take no model at all and
@@ -49,6 +53,7 @@ class ModelRole(StrEnum):
     ORDER_STATUS = "order_status"
     TITLE = "title"
     COOKING = "cooking"
+    SMALL_TALK = "small_talk"
 
 
 class ReasoningEffort(StrEnum):
@@ -130,12 +135,20 @@ class AgentSettings(BaseSettings):
     # gives. The user is waiting, but this node is on `PROSE_NODES` so its
     # tokens stream - perceived latency is the first token, not the last.
     MODEL_COOKING: str = "gpt-5.6-luna"
-    # The router emits a four-way label from an explicit rubric; reasoning
+    # Small talk: nano, for the same cached-input reason as the router. One
+    # short warm line back to "thanks, that was delicious" is the least
+    # demanding generation in the system, and it is on `PROSE_NODES` so it
+    # streams.
+    MODEL_SMALL_TALK: str = "gpt-5.4-nano-2026-03-17"
+    # The router emits a single label from an explicit rubric; reasoning
     # tokens buy nothing there and are billed at output rates.
     MODEL_ROUTER_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
     # Same reasoning, and the stronger one: the user is waiting on this reply,
     # so latency spent thinking about a one-sentence status is latency wasted.
     MODEL_ORDER_STATUS_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
+    # And again: there is nothing to think about in "glad it turned out well",
+    # and reasoning tokens are billed at output rates for a one-line reply.
+    MODEL_SMALL_TALK_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.NONE
 
     # Checkpointer connection pool (CUE-93). This pool is the graph's, and it
     # is **separate from SQLAlchemy's** (`DATABASE_POOL_SIZE`): the checkpointer
@@ -199,6 +212,11 @@ class AgentSettings(BaseSettings):
                 # luna does not offer the reasoning-effort dial, same as
                 # RECIPE and VISION.
                 return ModelChoice(model_id=self.MODEL_COOKING)
+            case ModelRole.SMALL_TALK:
+                return ModelChoice(
+                    model_id=self.MODEL_SMALL_TALK,
+                    reasoning_effort=self.MODEL_SMALL_TALK_REASONING_EFFORT,
+                )
 
 
 @lru_cache

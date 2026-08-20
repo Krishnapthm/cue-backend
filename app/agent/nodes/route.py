@@ -9,6 +9,11 @@ CUE-120 added a fifth path, `cooking_question`, which is *conditionally
 available*: the classifier is only told the intent exists on a turn that
 carries a step index and whose session already holds a recipe. Everything about
 routing on a turn without both is exactly as it was.
+
+A sixth path, `small_talk`, takes the pleasantries that used to fall into
+`out_of_scope` and be answered with the refusal. See
+`app/agent/nodes/small_talk.py` for why a thank-you needed its own branch
+rather than a softer refusal message.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ RouteTarget = Literal[
     "parse_recipe_photo",
     "order_status",
     "answer_cooking_question",
+    "small_talk",
 ]
 
 _INTENT_ROUTES: dict[TurnIntent, RouteTarget] = {
@@ -50,6 +56,7 @@ _INTENT_ROUTES: dict[TurnIntent, RouteTarget] = {
     TurnIntent.PHOTO: "parse_recipe_photo",
     TurnIntent.ORDER_STATUS: "order_status",
     TurnIntent.COOKING_QUESTION: "answer_cooking_question",
+    TurnIntent.SMALL_TALK: "small_talk",
 }
 
 # The delimiter the user's turn is wrapped in. The classifier is told
@@ -88,6 +95,20 @@ _SYSTEM_PROMPT = (
     "'has the delivery left yet'\n"
     "- Note the difference from `recipe`: this is about a placed order, not "
     "about what to cook or buy next.\n"
+    "\n"
+    "`small_talk` - the user is being social rather than asking for work:\n"
+    "- Thanks, praise, or telling you how the dish went ('thank you!', 'wow "
+    "that turned out so good', 'you nailed it')\n"
+    "- Greetings and sign-offs ('hey', 'good morning', 'goodnight', 'talk "
+    "later')\n"
+    "- A short pleasantry or bit of banter with no request in it\n"
+    "- These are welcome. They are not `out_of_scope`: that label exists for "
+    "work Cue will not do, and answering a compliment with a refusal is a bug, "
+    "not caution.\n"
+    "- This is the lowest-precedence label. A turn that also carries a real "
+    "request ('thanks! now what can I make with paneer') is labelled by the "
+    "request, not by the pleasantry wrapped around it. Only reach for "
+    "`small_talk` when there is no request in the turn at all.\n"
     "\n"
     "`out_of_scope` - anything else, including:\n"
     "- Writing, explaining, reviewing, or debugging code\n"

@@ -73,7 +73,7 @@ class AgentState(TypedDict):
     stay valid without passing `guardrail=None`.
 
     `turn_intent` is `route_turn`'s verdict for the current turn: which of the
-    five entry paths it took. `guardrail` keeps the in-scope/out-of-scope
+    six entry paths it took. `guardrail` keeps the in-scope/out-of-scope
     framing for logs and traces; this is the branch that was actually run.
 
     `active_step_index` is the 1-based step the user is looking at in cooking

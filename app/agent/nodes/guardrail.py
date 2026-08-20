@@ -17,11 +17,12 @@ from app.agent.state import AgentState
 
 logger = logging.getLogger(__name__)
 
-REFUSAL_MESSAGE = (
-    "I can only help with cooking - tell me a dish, describe a meal you're "
-    "after, or list what's in your fridge, and I'll put together the "
-    "ingredients you need."
-)
+#: One line, because a refusal is a boundary and not a briefing. The long
+#: version recited what Cue does and how to ask for it, which reads as a
+#: lecture even when the turn deserved a no - and pleasantries no longer reach
+#: this node at all, so the message no longer has to carry the friendly case
+#: too. See `app/agent/nodes/small_talk.py`.
+REFUSAL_MESSAGE = "That one's outside what I do - but I'm all yours for cooking."
 
 
 def refuse_node(state: AgentState) -> dict[str, Any]:

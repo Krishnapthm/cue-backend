@@ -149,6 +149,103 @@ async def test_assumed_staples_never_reach_the_checklist_or_cart_path() -> None:
     ]
 
 
+# --- model-flagged staples and user-supplied ingredients --------------------
+
+
+async def test_a_model_flagged_pantry_staple_never_reaches_the_checklist() -> None:
+    # The complaint this fixes: dried red chillies and turmeric are background
+    # seasoning in most Indian dishes, and no fixed name list can say so per
+    # dish, so the recipe model flags them and the checklist stops asking.
+    state = _state(
+        [
+            RecipeIngredient(name="urad dal", quantity=1, unit="cup"),
+            RecipeIngredient(name="dried red chillies", quantity=4, pantry_staple=True),
+            RecipeIngredient(
+                name="turmeric powder", quantity=0.5, unit="tsp", pantry_staple=True
+            ),
+        ],
+        have_marks={"unrelated"},
+    )
+
+    update = await normalize_ingredients_node(state, cast(Any, None))
+    normalized_state = cast(AgentState, {**state, **update})
+
+    assert [row.name for row in update["normalized_ingredients"]] == ["urad dal"]
+    assert [row.name for row in needed_ingredients(normalized_state)] == ["urad dal"]
+
+
+async def test_a_bulk_flagged_staple_is_still_asked_about() -> None:
+    # A chilli paste built on 750 g of chillies is not a pinch from the
+    # cupboard, and the bulk exception covers the model's flag as well as the
+    # name list.
+    state = _state(
+        [
+            RecipeIngredient(
+                name="dried red chillies",
+                quantity=750,
+                unit="g",
+                pantry_staple=True,
+            ),
+        ],
+        have_marks={"unrelated"},
+    )
+
+    update = await normalize_ingredients_node(state, cast(Any, None))
+
+    assert [row.name for row in update["normalized_ingredients"]] == [
+        "dried red chillies"
+    ]
+
+
+async def test_an_ingredient_the_user_says_they_have_is_not_listed() -> None:
+    # "I want to make idly and coconut chutney. I already have idly batter."
+    # The batter is a real ingredient of the dish and stays on the recipe card;
+    # what it must not be is a row asking the user whether they have it.
+    state = _state(
+        [
+            RecipeIngredient(
+                name="idli batter", quantity=3, unit="cup", user_supplied=True
+            ),
+            RecipeIngredient(name="coconut", quantity=1),
+            RecipeIngredient(name="green chillies", quantity=2),
+        ],
+        have_marks={"unrelated"},
+    )
+
+    update = await normalize_ingredients_node(state, cast(Any, None))
+    normalized_state = cast(AgentState, {**state, **update})
+
+    assert [row.name for row in update["normalized_ingredients"]] == [
+        "coconut",
+        "green chillies",
+    ]
+    assert [item["name"] for item in checklist_payload(normalized_state)["items"]] == [
+        "coconut",
+        "green chillies",
+    ]
+    # And it is never bought: the fan-out only ever sees the rows above.
+    assert "idli batter" not in {
+        row.name for row in needed_ingredients(normalized_state)
+    }
+
+
+async def test_a_user_supplied_ingredient_is_dropped_however_much_is_needed() -> None:
+    # Unlike a staple this has no bulk exception. The user said they have it;
+    # the recipe calling for two kilos of it is not evidence against that.
+    state = _state(
+        [
+            RecipeIngredient(
+                name="idli batter", quantity=2, unit="kg", user_supplied=True
+            ),
+        ],
+        have_marks={"unrelated"},
+    )
+
+    update = await normalize_ingredients_node(state, cast(Any, None))
+
+    assert update["normalized_ingredients"] == []
+
+
 # --- the pantry seed -------------------------------------------------------
 
 
