@@ -10,13 +10,16 @@ up holding rather than that a canned payload came back.
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 
 import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.cart import CartPlan, CartPlanItem
 from app.models.provider import ProviderLink
+from app.models.tag import TagBinding
 from app.models.user import User
 from tests.cart.conftest import FakeInstamart
 from tests.conftest import InstamartToolCallStub
@@ -120,6 +123,90 @@ async def test_get_cart_preserves_rating_object_from_the_server_cart(
 
     assert response.status_code == 200
     assert response.json()["items"][0]["rating"] == {"value": "4.6", "count": "9.8k"}
+
+
+async def test_get_cart_reads_a_line_swiggy_names_with_display_name(
+    authed_client: httpx.AsyncClient, fake_instamart: FakeInstamart
+) -> None:
+    """Swiggy does not spell the line's name the same way in every payload."""
+    fake_instamart.items = {"spin-1": 1}
+    fake_instamart.metadata = {"spin-1": {"displayName": "Amul Gold Milk 1 L"}}
+
+    response = await authed_client.get("/cart")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["productName"] == "Amul Gold Milk 1 L"
+
+
+async def test_get_cart_names_an_unnamed_line_from_the_chat_that_composed_it(
+    authed_client: httpx.AsyncClient,
+    fake_instamart: FakeInstamart,
+    db_session: AsyncSession,
+    cart_plan: CartPlan,
+) -> None:
+    """A cart the user never wrote from this device still reads as products.
+
+    A chat composes server-side, so the app learns those lines only by reading
+    the cart back - and Swiggy can answer without naming them. The plan that
+    composed them holds the name.
+    """
+    db_session.add(
+        CartPlanItem(
+            plan_id=cart_plan.id,
+            ingredient_name="basmati rice",
+            match_status="matched",
+            spin_id="spin-1",
+            product_name="India Gate Basmati Rice 1 kg",
+            pack_size="1 kg",
+            unit_price=Decimal("120.00"),
+            quantity=1,
+            selection_reason="Selected India Gate 1 kg.",
+        )
+    )
+    await db_session.commit()
+    fake_instamart.items = {"spin-1": 1}
+
+    response = await authed_client.get("/cart")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["productName"] == "India Gate Basmati Rice 1 kg"
+
+
+async def test_get_cart_names_an_unnamed_line_from_the_pantry_sticker(
+    authed_client: httpx.AsyncClient,
+    fake_instamart: FakeInstamart,
+    db_session: AsyncSession,
+    linked_user: User,
+) -> None:
+    db_session.add(
+        TagBinding(
+            user_id=linked_user.id,
+            tag_uid="04A2",
+            tag_text="haldi",
+            spin_id="spin-1",
+            product_name="Everest Haldi Powder 200 g",
+            address_id=ADDRESS_ID,
+        )
+    )
+    await db_session.commit()
+    fake_instamart.items = {"spin-1": 1}
+
+    response = await authed_client.get("/cart")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["productName"] == "Everest Haldi Powder 200 g"
+
+
+async def test_get_cart_leaves_a_line_nobody_can_name_alone(
+    authed_client: httpx.AsyncClient, fake_instamart: FakeInstamart
+) -> None:
+    """An item added in the Swiggy app itself, that Swiggy returns unnamed."""
+    fake_instamart.items = {"spin-unknown": 1}
+
+    response = await authed_client.get("/cart")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["productName"] is None
 
 
 async def test_get_empty_cart_is_not_an_error(
