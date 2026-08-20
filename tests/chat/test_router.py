@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.exceptions import RecipeGenerationError
 from app.chat.constants import ADDRESS_REQUIRED_MESSAGE
 from app.chat.dependencies import agent_graph
+from app.chat.schemas import RecipeCardPayload
 from app.database import get_session
 from app.main import app
 from app.models.chat import ChatSession
@@ -883,3 +884,291 @@ async def test_a_resumed_turn_ends_on_the_cart_it_produced(
     assert response.json()["assistant_message"]["kind"] == "cart_ready"
     transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
     assert [m["kind"] for m in transcript["messages"]] == ["checklist", "cart_ready"]
+
+
+RECIPE: dict[str, Any] = {
+    "dish_name": "paneer butter masala",
+    "estimated_time_minutes": 35,
+    "ingredients": [{"name": "paneer", "quantity": 250, "unit": "g"}],
+    "method_summary": "Simmer the gravy, fold in the paneer.",
+    "steps": [
+        {
+            "title": "Simmer the gravy",
+            "instructions": ["Blend the tomatoes.", "Simmer until it thickens."],
+            "duration_seconds": 900,
+        },
+        {"title": "Fold in the paneer", "instructions": ["Fold gently, off heat."]},
+    ],
+    "servings": 2,
+    "difficulty": "Easy",
+}
+
+
+async def test_a_cart_turn_appends_the_recipe_card_after_the_cart(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The product framing is "once the cart is ready, show the full recipe", so
+    # the recipe card is the last message of the turn - after `cart_ready`,
+    # never before it.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.cart_report = CART_REPORT
+    fake_agent.recipe = RECIPE
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == [
+        "text",
+        "cart_ready",
+        "recipe",
+    ]
+
+
+async def test_the_recipe_card_is_not_the_turns_reply(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The turn still *answers* with the cart. The recipe card is the durable
+    # copy cooking mode reads back later, not a second reply.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.cart_report = CART_REPORT
+    fake_agent.recipe = RECIPE
+
+    response = await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    assert response.json()["assistant_message"]["kind"] == "cart_ready"
+
+
+async def test_the_recipe_card_payload_carries_1_based_stable_step_indexes(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # Cooking mode saves the user's place as an index into this list, so the
+    # numbering is part of the contract - not the reader's array offset.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.cart_report = CART_REPORT
+    fake_agent.recipe = RECIPE
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    payload = transcript["messages"][-1]["payload"]
+    assert payload["ui"] == "recipe"
+    assert payload["dish_name"] == "paneer butter masala"
+    assert payload["servings"] == 2
+    assert payload["difficulty"] == "Easy"
+    assert payload["method_summary"] == RECIPE["method_summary"]
+    assert [step["index"] for step in payload["steps"]] == [1, 2]
+    assert payload["steps"][0]["title"] == "Simmer the gravy"
+    assert payload["steps"][0]["duration_seconds"] == 900
+    # An untimed step stays null rather than being given a guessed countdown.
+    assert payload["steps"][1]["duration_seconds"] is None
+
+
+async def test_the_persisted_recipe_payload_validates_against_its_schema(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The transcript is the app's replay surface, so what comes back out of
+    # `GET /chat/sessions/{id}` has to be exactly what the client parses.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.cart_report = CART_REPORT
+    fake_agent.recipe = RECIPE
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    card = RecipeCardPayload.model_validate(transcript["messages"][-1]["payload"])
+
+    assert card.ui == "recipe"
+    assert [step.index for step in card.steps] == [1, 2]
+
+
+async def test_a_single_step_recipe_is_valid(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.cart_report = CART_REPORT
+    fake_agent.recipe = {
+        **RECIPE,
+        "steps": [{"title": "Toast it", "instructions": ["Toast the bread."]}],
+    }
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "toast"},
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    payload = transcript["messages"][-1]["payload"]
+    assert [step["index"] for step in payload["steps"]] == [1]
+
+
+async def test_a_turn_with_no_cart_writes_no_recipe_card(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # An order-status or out-of-scope turn ends on prose and buys nothing, so
+    # there is no cart for a recipe card to hang off.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.recipe = RECIPE
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "where is my order"},
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == ["text", "text"]
+
+
+async def test_a_cart_turn_with_no_recipe_writes_no_recipe_card(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.cart_report = CART_REPORT
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == ["text", "cart_ready"]
+
+
+async def test_a_paused_turn_writes_no_recipe_card_yet(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The card is tied to a *completed* cart, not to a generated recipe: a turn
+    # still waiting on the checklist has not bought anything yet.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.interrupt_value = {"ui": "checklist", "items": []}
+    fake_agent.recipe = RECIPE
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "content": "paneer butter masala"},
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == ["text", "checklist"]
+
+
+async def test_a_resumed_cart_turn_appends_the_recipe_card(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The resume is the turn that actually produces the cart, so it is the turn
+    # the recipe card lands on.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.interrupts = (FakeInterrupt(id="int-1", value={"ui": "checklist"}),)
+    fake_agent.cart_report = CART_REPORT
+    fake_agent.recipe = RECIPE
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={"role": "user", "kind": "checklist", "payload": {"have": ["salt"]}},
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == [
+        "checklist",
+        "cart_ready",
+        "recipe",
+    ]
+
+
+async def test_re_running_a_turn_appends_a_second_recipe_card(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # The transcript is append-only: a second turn adds a second card rather
+    # than mutating the first, so the history of what was cooked stays intact.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.cart_report = CART_REPORT
+    fake_agent.recipe = RECIPE
+
+    for dish in ("paneer butter masala", "dal tadka"):
+        await authed_client.post(
+            f"/chat/sessions/{session_id}/messages",
+            json={"role": "user", "content": dish},
+        )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == [
+        "text",
+        "cart_ready",
+        "recipe",
+        "text",
+        "cart_ready",
+        "recipe",
+    ]
+    ids = [m["id"] for m in transcript["messages"] if m["kind"] == "recipe"]
+    assert ids[0] != ids[1]
+
+
+async def test_a_photo_cart_turn_writes_the_same_recipe_card(
+    authed_client: httpx.AsyncClient,
+    fake_agent: FakeAgentGraph,
+    with_address: SelectAddress,
+) -> None:
+    # A photo turn's parsed recipe goes through the identical schema, so there
+    # stays exactly one card shape for the client to render.
+    session_id = (await authed_client.post("/chat/sessions")).json()["id"]
+    await with_address(session_id)
+    fake_agent.cart_report = CART_REPORT
+    fake_agent.recipe = RECIPE
+
+    await authed_client.post(
+        f"/chat/sessions/{session_id}/messages",
+        json={
+            "role": "user",
+            "kind": "image",
+            "payload": {"object_path": "recipes/u1/8f2c.jpg"},
+        },
+    )
+
+    transcript = (await authed_client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == [
+        "image",
+        "cart_ready",
+        "recipe",
+    ]
+    assert transcript["messages"][-1]["payload"]["ui"] == "recipe"

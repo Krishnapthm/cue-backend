@@ -4,11 +4,19 @@ import asyncio
 import uuid
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.schemas import GeneratedRecipe, RecipeIngredient, RecipeStep
 from app.chat import service
 from app.chat.exceptions import ChatSessionNotFoundError
-from app.chat.schemas import CreateMessageRequest, MessageKind, MessageRole
+from app.chat.schemas import (
+    CreateMessageRequest,
+    MessageKind,
+    MessageRole,
+    RecipeCardPayload,
+    RecipeStepPayload,
+)
 from app.models.chat import ChatSession
 from app.models.user import User
 
@@ -194,3 +202,58 @@ async def test_append_message_raises_when_owned_by_another_user(
             chat_session.id,
             CreateMessageRequest(role=MessageRole.USER, content="hi"),
         )
+
+
+def test_recipe_card_payload_numbers_steps_from_one() -> None:
+    """Numbering lives in one place, so no reader has to count for itself."""
+    recipe = GeneratedRecipe(
+        dish_name="paneer butter masala",
+        estimated_time_minutes=35,
+        ingredients=[RecipeIngredient(name="paneer", quantity=250, unit="g")],
+        method_summary="Simmer the gravy, fold in the paneer.",
+        steps=[
+            RecipeStep(
+                title="Simmer the gravy",
+                instructions=["Simmer until it thickens."],
+                duration_seconds=900,
+            ),
+            RecipeStep(title="Fold in the paneer", instructions=["Fold gently."]),
+            RecipeStep(
+                title="Rest", instructions=["Rest off heat."], duration_seconds=300
+            ),
+        ],
+        servings=2,
+        difficulty="Easy",
+    )
+
+    card = RecipeCardPayload.from_recipe(recipe)
+
+    assert card.ui == "recipe"
+    assert [step.index for step in card.steps] == [1, 2, 3]
+    assert [step.duration_seconds for step in card.steps] == [900, None, 300]
+    # The summary rides along beside the steps: it is the collapsed card's
+    # clipped preview, not the steps rendered as prose.
+    assert card.method_summary == recipe.method_summary
+
+
+def test_recipe_card_payload_keeps_absent_meta_absent() -> None:
+    recipe = GeneratedRecipe(
+        dish_name="toast",
+        estimated_time_minutes=3,
+        ingredients=[],
+        method_summary="Toast the bread.",
+        steps=[RecipeStep(title="Toast", instructions=["Toast the bread."])],
+    )
+
+    card = RecipeCardPayload.from_recipe(recipe)
+
+    assert card.servings is None
+    assert card.difficulty is None
+
+
+def test_a_step_index_must_be_one_based() -> None:
+    # A saved cooking position is an index into this list, so 0 is not a
+    # position - it is a numbering bug that would send cooking mode to the
+    # wrong card.
+    with pytest.raises(ValidationError):
+        RecipeStepPayload(index=0, title="Chop", instructions=["Chop."])

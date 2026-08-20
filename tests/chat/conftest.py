@@ -105,6 +105,12 @@ class FakeAgentGraph:
     #: before the resume branch, because a resumed turn is exactly the one that
     #: produces a cart.
     cart_report: dict[str, Any] | None = None
+    #: The recipe on the session's state, as the checkpointer holds it (CUE-118).
+    #: `ainvoke` returns it with the final state; `astream` does *not*, because
+    #: `updates` mode yields deltas and the resume re-runs no node that writes
+    #: it - so the streaming path reads it back through `aget_state`, exactly as
+    #: it does against a real checkpointer.
+    recipe: dict[str, Any] | None = None
 
     async def ainvoke(
         self,
@@ -125,6 +131,8 @@ class FakeAgentGraph:
             }
         if self.cart_report is not None:
             report: dict[str, Any] = {"messages": [], "cart_report": self.cart_report}
+            if self.recipe is not None:
+                report["recipe"] = self.recipe
             if isinstance(state, Command):
                 resumed = cast("dict[str, Any]", state.resume)
                 if "have" in resumed:
@@ -166,7 +174,8 @@ class FakeAgentGraph:
             yield chunk
 
     async def aget_state(self, config: dict[str, Any]) -> Any:
-        return SimpleNamespace(interrupts=self.interrupts)
+        values = {"recipe": self.recipe} if self.recipe is not None else {}
+        return SimpleNamespace(interrupts=self.interrupts, values=values)
 
 
 #: Signature of the `with_address` fixture: (session_id, address_id=...) -> None.

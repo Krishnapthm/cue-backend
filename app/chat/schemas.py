@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.agent.schemas import MatchResult
+from app.agent.schemas import GeneratedRecipe, MatchResult
 from app.cart.schemas import MatchStatus
 from app.instamart.schemas import ProductRating
 
@@ -20,6 +20,7 @@ class MessageKind(StrEnum):
     IMAGE = "image"
     CHECKLIST = "checklist"
     CART_READY = "cart_ready"
+    RECIPE = "recipe"
 
 
 class MessageRole(StrEnum):
@@ -42,6 +43,80 @@ class ImageMessagePayload(BaseModel):
     """
 
     object_path: str = Field(min_length=1)
+
+
+class RecipeStepPayload(BaseModel):
+    """One step of a persisted recipe card, as the client renders it.
+
+    A projection of `agent.schemas.RecipeStep` rather than the model itself,
+    for the `index` alone: cooking mode navigates by position and saves the
+    user's place as a number, so the position has to be a field on the wire and
+    not the reader's array offset.
+
+    `index` is **1-based and stable**. A saved cooking position is an index into
+    this list, so nothing may renumber it - not a later reordering, not a
+    filtering of steps on the way out.
+    """
+
+    index: int = Field(ge=1)
+    title: str
+    instructions: list[str]
+    duration_seconds: int | None = None
+
+
+class RecipeCardPayload(BaseModel):
+    """The `payload` of a `kind='recipe'` message: the full recipe card.
+
+    Persisted at the end of a cart turn so the reveal card and cooking mode
+    both work on a cold start, hours after the order was placed, with no new
+    endpoint and no checkpoint read. The recipe otherwise exists only inside
+    the LangGraph checkpoint, which is an opaque blob keyed by thread.
+
+    `ui` is a discriminator for the same reason `ChecklistInterrupt.ui` is one:
+    the client routes on an explicit field, never on the payload's shape.
+
+    `method_summary` rides along beside `steps` because it is what the
+    collapsed card shows as its clipped preview - it is not the steps in prose
+    form, and one does not substitute for the other.
+    """
+
+    ui: Literal["recipe"] = "recipe"
+    dish_name: str
+    estimated_time_minutes: int
+    servings: int | None = None
+    difficulty: str | None = None
+    method_summary: str
+    steps: list[RecipeStepPayload]
+
+    @classmethod
+    def from_recipe(cls, recipe: GeneratedRecipe) -> Self:
+        """Project a generated recipe onto the card the transcript stores.
+
+        Numbering happens here, once, so `index` is assigned in exactly one
+        place rather than by each reader counting for itself.
+
+        Args:
+            recipe: The recipe the turn generated.
+
+        Returns:
+            The card payload, its steps numbered from 1 in cooking order.
+        """
+        return cls(
+            dish_name=recipe.dish_name,
+            estimated_time_minutes=recipe.estimated_time_minutes,
+            servings=recipe.servings,
+            difficulty=recipe.difficulty,
+            method_summary=recipe.method_summary,
+            steps=[
+                RecipeStepPayload(
+                    index=position,
+                    title=step.title,
+                    instructions=step.instructions,
+                    duration_seconds=step.duration_seconds,
+                )
+                for position, step in enumerate(recipe.steps, start=1)
+            ],
+        )
 
 
 class CreateMessageRequest(BaseModel):

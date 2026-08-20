@@ -481,3 +481,72 @@ async def test_a_streamed_cart_turn_ends_on_the_card(
     transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
     assert [m["kind"] for m in transcript["messages"]] == ["text", "cart_ready"]
     assert transcript["messages"][1]["payload"]["plan_id"] == 7
+
+
+async def test_a_streamed_cart_turn_appends_the_recipe_card(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    """The recipe card survives the stream, the same way the cart card does.
+
+    The streaming path cannot see the recipe in its `updates` chunks: those are
+    deltas, and the turn that produces the cart is the resume, which re-runs no
+    node that writes the recipe. So it is read back off the checkpoint - this
+    test is what proves that read happens.
+    """
+    from tests.chat.test_router import CART_REPORT, RECIPE
+
+    fake_agent.chunks = [
+        ("updates", {"compose_cart": {"cart_plan_id": 7}}),
+        ("updates", {"report_cart": {"cart_report": CART_REPORT}}),
+    ]
+    fake_agent.recipe = RECIPE
+
+    response = await _stream(client, session_id, "paneer butter masala")
+
+    frames = _frames(response.text)
+    (done,) = [payload for name, payload in frames if name == "done"]
+    # The turn still answers with the cart; the recipe card is not the reply.
+    assert done["reply"] == CART_REPORT["summary"]
+
+    transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == [
+        "text",
+        "cart_ready",
+        "recipe",
+    ]
+    payload = transcript["messages"][-1]["payload"]
+    assert payload["ui"] == "recipe"
+    assert [step["index"] for step in payload["steps"]] == [1, 2]
+
+
+async def test_a_streamed_turn_with_no_cart_writes_no_recipe_card(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    from tests.chat.test_router import RECIPE
+
+    fake_agent.recipe = RECIPE
+
+    await _stream(client, session_id, "where is my order")
+
+    transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
+    assert not [m for m in transcript["messages"] if m["kind"] == "recipe"]
+
+
+async def test_a_streamed_turn_that_fails_after_the_cart_writes_no_recipe_card(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    """A failed turn writes no card, even though the recipe exists.
+
+    The card is tied to a completed cart, not to a generated recipe: a turn
+    that died mid-stream has not necessarily bought anything, and a recipe card
+    sitting under a failure reads as an order that went through.
+    """
+    from tests.chat.test_router import RECIPE
+
+    fake_agent.recipe = RECIPE
+    fake_agent.raises = InstamartTransportError()
+
+    await _stream(client, session_id, "paneer butter masala")
+
+    transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
+    assert not [m for m in transcript["messages"] if m["kind"] == "recipe"]
