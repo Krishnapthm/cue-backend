@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
     "You are a recipe generation assistant. Given a dish name, produce a "
-    "structured recipe: a list of ingredients (name, quantity, unit) and a "
-    "brief method summary.\n"
+    "structured recipe: a list of ingredients (name, quantity, unit), a "
+    "brief method summary, and the cooking steps the user will actually "
+    "follow.\n"
     "\n"
     "Rules:\n"
     "- Always produce a complete, best-effort recipe, even if the dish name "
@@ -51,7 +52,22 @@ _SYSTEM_PROMPT = (
     "markdown, bullet points, or numbered steps - it is a summary, not a "
     "full recipe card.\n"
     "- estimated_time_minutes is your best-effort total time (prep + cook) "
-    "in minutes."
+    "in minutes.\n"
+    "- steps is the method the user cooks from, in cooking order. Give at "
+    "least one step. Each step has a short imperative title ('Soften the "
+    "onions'), 1-4 short imperative instruction lines, and nothing else - "
+    "no step numbers in the title, no markdown.\n"
+    "- Set duration_seconds on a step ONLY where it has a genuine timed or "
+    "unattended stretch: a simmer, a rest, a proof, a bake, a marinade. "
+    "Leave it null on every other step. Do not guess a number for chopping, "
+    "mixing, or plating - a wrong timer is worse than no timer.\n"
+    "- steps and method_summary are not the same thing and both are "
+    "required: the summary stays a brief prose overview, the steps are the "
+    "instructions. Do not put the summary in the steps or vice versa.\n"
+    "- servings is the number of people the quantities above serve, and "
+    "difficulty is one short label - exactly 'Easy', 'Medium', or 'Hard'. "
+    "Omit either (leave null) rather than guessing one you are not "
+    "reasonably confident about."
 )
 
 
@@ -233,7 +249,8 @@ _PHOTO_SYSTEM_PROMPT = (
     "recipe (e.g. a cookbook page, a handwritten note, a packaging label, or "
     "a screenshot). Read the image and produce the same structured recipe "
     "schema used for text-based recipe generation: a list of ingredients "
-    "(name, quantity, unit) and a brief method summary.\n"
+    "(name, quantity, unit), a brief method summary, and the cooking "
+    "steps.\n"
     "\n"
     "Rules:\n"
     "- Always produce a complete, best-effort structured recipe, even if the "
@@ -245,7 +262,10 @@ _PHOTO_SYSTEM_PROMPT = (
     "ingredients or cooking instructions visible), return an EMPTY "
     "ingredients list and set method_summary to a brief plain-text note that "
     "nothing recipe-related was recognized in the image. Do this instead of "
-    "raising an error or refusing.\n"
+    "raising an error or refusing. steps must still hold exactly ONE step, "
+    "whose title and single instruction line say the same thing in plain "
+    "text - that nothing recipe-related was recognized. Never return an "
+    "empty steps list.\n"
     "- Quantities and units are optional per ingredient - omit them (leave "
     "null) rather than guessing a number you cannot read with reasonable "
     "confidence.\n"
@@ -255,7 +275,23 @@ _PHOTO_SYSTEM_PROMPT = (
     "in minutes; if the image is unreadable or not a recipe, use 0.\n"
     "- dish_name is your best-effort read of the dish's name; if unreadable "
     "or not a recipe at all, use a short literal description of what the "
-    "image shows instead."
+    "image shows instead.\n"
+    "- steps is the method the user cooks from, in cooking order, read off "
+    "the image. Give at least one step. Each step has a short imperative "
+    "title ('Soften the onions'), 1-4 short imperative instruction lines, "
+    "and nothing else - no step numbers in the title, no markdown. If the "
+    "photo shows ingredients but no method, infer the minimum plausible "
+    "steps rather than returning none.\n"
+    "- Set duration_seconds on a step ONLY where the image states or clearly "
+    "implies a timed or unattended stretch: a simmer, a rest, a proof, a "
+    "bake, a marinade. Leave it null on every other step, and never guess a "
+    "number you cannot read - a wrong timer is worse than no timer.\n"
+    "- steps and method_summary are not the same thing and both are "
+    "required: the summary stays a brief prose overview, the steps are the "
+    "instructions. Do not put the summary in the steps or vice versa.\n"
+    "- servings is the number of people the recipe serves and difficulty is "
+    "one short label - exactly 'Easy', 'Medium', or 'Hard'. Omit either "
+    "(leave null) rather than guessing one the image does not support."
 )
 
 _IMAGE_MIME_TYPES: dict[str, str] = {
@@ -303,6 +339,15 @@ async def parse_recipe_photo_node(state: AgentState) -> dict[str, Any]:
     uses, so both intake paths (typed dish name, uploaded photo) render
     through the exact same `GeneratedRecipe` schema - one review surface, per
     the issue's acceptance criteria.
+
+    That includes `steps`, which stays `min_length=1` on this path rather than
+    being relaxed to `min_length=0` for the "not a recipe at all" branch. A
+    photo with nothing recipe-related in it returns an empty `ingredients` list
+    and a *single explanatory step* saying so, which the prompt asks for
+    explicitly. One invariant ("a recipe always has at least one step") is
+    worth more than the branch it saves here: relaxing the floor would push an
+    empty-list case onto the reveal card and cooking mode, neither of which has
+    anything to render for it.
 
     Downscaling large source images is deliberately NOT done here: per the
     issue, an oversized source image is a cost/latency concern, not a

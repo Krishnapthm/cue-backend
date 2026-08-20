@@ -26,7 +26,12 @@ from httpx import ASGITransport
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app.agent import graph as graph_module
-from app.agent.schemas import MatchResult
+from app.agent.schemas import (
+    GeneratedRecipe,
+    MatchResult,
+    RecipeIngredient,
+    RecipeStep,
+)
 from app.cart.schemas import MatchStatus
 from app.chat.dependencies import agent_graph
 
@@ -182,6 +187,43 @@ def test_checkpointer_serializer_explicitly_allows_agent_state_types(
         restored = serde.loads_typed(serde.dumps_typed(result))
 
     assert restored == result
+    assert "Deserializing unregistered type" not in caplog.text
+
+
+def test_checkpointer_serializer_round_trips_a_recipe_with_steps(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`RecipeStep` is on the allowlist, so a resumed cooking session survives.
+
+    Nothing in the test suite fails when a new checkpointed type is missing
+    from `_CHECKPOINTED_MSGPACK_TYPES` - it fails in production, on the resume,
+    which is the one moment the user has already committed to the turn. This is
+    that test for CUE-116's `steps`.
+    """
+    recipe = GeneratedRecipe(
+        dish_name="paneer butter masala",
+        estimated_time_minutes=35,
+        ingredients=[RecipeIngredient(name="paneer", quantity=250, unit="g")],
+        method_summary="Simmer the gravy, fold in paneer.",
+        steps=[
+            RecipeStep(
+                title="Simmer the gravy",
+                instructions=["Simmer until it thickens."],
+                duration_seconds=900,
+            ),
+            RecipeStep(title="Fold in the paneer", instructions=["Fold gently."]),
+        ],
+        servings=2,
+        difficulty="Easy",
+    )
+    serde = graph_module._checkpoint_serde()
+
+    with caplog.at_level("WARNING", logger="langgraph.checkpoint.serde.jsonplus"):
+        restored = serde.loads_typed(serde.dumps_typed(recipe))
+
+    assert restored == recipe
+    assert restored.steps[0].duration_seconds == 900
+    assert restored.steps[1].duration_seconds is None
     assert "Deserializing unregistered type" not in caplog.text
 
 

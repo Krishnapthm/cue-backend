@@ -13,6 +13,7 @@ from app.agent.nodes import scratch_choice as node
 from app.agent.schemas import (
     GeneratedRecipe,
     RecipeIngredient,
+    RecipeStep,
     ScratchChoice,
     ScratchComponent,
 )
@@ -32,6 +33,12 @@ def _recipe() -> GeneratedRecipe:
             RecipeIngredient(name="potato", quantity=2),
         ],
         method_summary="Ferment the batter, then cook and fill the dosas.",
+        steps=[
+            RecipeStep(
+                title="Cook it",
+                instructions=["Combine everything and cook."],
+            )
+        ],
         scratch_components=[
             ScratchComponent(
                 name="dosa batter",

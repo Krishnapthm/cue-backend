@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.agent.config import ModelRole
 from app.agent.context import CueContext
 from app.agent.nodes import title as title_node
-from app.agent.schemas import GeneratedRecipe
+from app.agent.schemas import GeneratedRecipe, RecipeStep
 from app.agent.state import AgentState
 from app.models.chat import ChatSession
 from app.models.user import User
@@ -133,6 +133,12 @@ async def test_schedule_title_node_never_blocks_later_turns(
             estimated_time_minutes=30,
             ingredients=[],
             method_summary="Cook.",
+            steps=[
+                RecipeStep(
+                    title="Cook it",
+                    instructions=["Combine everything and cook."],
+                )
+            ],
         ),
     }
     runtime = SimpleNamespace(

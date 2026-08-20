@@ -30,6 +30,7 @@ from app.agent.schemas import (
     IngredientStatus,
     NormalizedIngredient,
     RecipeIngredient,
+    RecipeStep,
     TurnClassification,
     TurnIntent,
 )
@@ -184,6 +185,12 @@ def stub_turn(monkeypatch: pytest.MonkeyPatch) -> None:
                     RecipeIngredient(name="salt"),
                 ],
                 method_summary="Simmer, fold in paneer.",
+                steps=[
+                    RecipeStep(
+                        title="Cook it",
+                        instructions=["Combine everything and cook."],
+                    )
+                ],
             )
         ]
     )

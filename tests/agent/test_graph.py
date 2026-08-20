@@ -34,6 +34,7 @@ from app.agent.schemas import (
     GeneratedRecipe,
     IngredientStatus,
     RecipeIngredient,
+    RecipeStep,
     TurnClassification,
     TurnIntent,
 )
@@ -151,6 +152,12 @@ def _recipe(dish_name: str = "paneer butter masala") -> GeneratedRecipe:
             RecipeIngredient(name="salt"),
         ],
         method_summary="Simmer the tomato gravy, add butter, fold in paneer.",
+        steps=[
+            RecipeStep(
+                title="Cook it",
+                instructions=["Combine everything and cook."],
+            )
+        ],
     )
 
 
