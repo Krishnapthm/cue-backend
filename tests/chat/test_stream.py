@@ -481,3 +481,222 @@ async def test_a_streamed_cart_turn_ends_on_the_card(
     transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
     assert [m["kind"] for m in transcript["messages"]] == ["text", "cart_ready"]
     assert transcript["messages"][1]["payload"]["plan_id"] == 7
+
+
+async def test_a_streamed_cart_turn_appends_the_recipe_card(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    """The recipe card survives the stream, the same way the cart card does.
+
+    The streaming path cannot see the recipe in its `updates` chunks: those are
+    deltas, and the turn that produces the cart is the resume, which re-runs no
+    node that writes the recipe. So it is read back off the checkpoint - this
+    test is what proves that read happens.
+    """
+    from tests.chat.test_router import CART_REPORT, RECIPE
+
+    fake_agent.chunks = [
+        ("updates", {"compose_cart": {"cart_plan_id": 7}}),
+        ("updates", {"report_cart": {"cart_report": CART_REPORT}}),
+    ]
+    fake_agent.recipe = RECIPE
+
+    response = await _stream(client, session_id, "paneer butter masala")
+
+    frames = _frames(response.text)
+    (done,) = [payload for name, payload in frames if name == "done"]
+    # The turn still answers with the cart; the recipe card is not the reply.
+    assert done["reply"] == CART_REPORT["summary"]
+
+    transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == [
+        "text",
+        "cart_ready",
+        "recipe",
+    ]
+    payload = transcript["messages"][-1]["payload"]
+    assert payload["ui"] == "recipe"
+    assert [step["index"] for step in payload["steps"]] == [1, 2]
+
+
+async def test_a_streamed_turn_with_no_cart_writes_no_recipe_card(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    from tests.chat.test_router import RECIPE
+
+    fake_agent.recipe = RECIPE
+
+    await _stream(client, session_id, "where is my order")
+
+    transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
+    assert not [m for m in transcript["messages"] if m["kind"] == "recipe"]
+
+
+async def test_a_streamed_turn_that_fails_after_the_cart_writes_no_recipe_card(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    """A failed turn writes no card, even though the recipe exists.
+
+    The card is tied to a completed cart, not to a generated recipe: a turn
+    that died mid-stream has not necessarily bought anything, and a recipe card
+    sitting under a failure reads as an order that went through.
+    """
+    from tests.chat.test_router import RECIPE
+
+    fake_agent.recipe = RECIPE
+    fake_agent.raises = InstamartTransportError()
+
+    await _stream(client, session_id, "paneer butter masala")
+
+    transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
+    assert not [m for m in transcript["messages"] if m["kind"] == "recipe"]
+
+
+# --- the cooking question (CUE-120) -----------------------------------------
+
+
+async def test_step_index_reaches_the_graph_from_the_query_string(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    """`EventSource` cannot send a body, so the step rides in the query string.
+
+    This is the signal that makes the cooking path reachable at all, and it
+    comes from the client's UI state rather than from anything the user typed -
+    which is exactly why the router can trust it.
+    """
+    await client.get(
+        f"/chat/sessions/{session_id}/stream",
+        params={"message": "is this brown enough?", "step_index": 3},
+    )
+
+    assert fake_agent.calls[-1].turn_state["active_step_index"] == 3
+
+
+async def test_a_stream_with_no_step_index_clears_it(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    # The field survives in the checkpoint, so a turn sent after the user has
+    # closed cooking mode has to clear it rather than inherit the last value -
+    # otherwise the cooking path stays on offer forever.
+    await _stream(client, session_id, "paneer butter masala")
+
+    assert fake_agent.calls[-1].turn_state["active_step_index"] is None
+
+
+async def test_a_zero_step_index_is_rejected_at_the_boundary(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    # Steps are 1-based everywhere - in the persisted card and here - so 0 is
+    # not an out-of-range position to clamp, it is a malformed request.
+    response = await client.get(
+        f"/chat/sessions/{session_id}/stream",
+        params={"message": "is this brown enough?", "step_index": 0},
+    )
+
+    assert response.status_code == 422
+    assert not fake_agent.calls
+
+
+async def test_cooking_answer_tokens_stream_as_token_events(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    """The cooking node is on `PROSE_NODES`, so its tokens reach the client.
+
+    It is the node that most needs streaming: the user is standing at the stove
+    waiting for the answer, and first-token latency is the whole experience.
+    """
+    fake_agent.chunks = [
+        (
+            "messages",
+            (
+                AIMessageChunk(content="Give it "),
+                {"langgraph_node": "answer_cooking_question"},
+            ),
+        ),
+        (
+            "messages",
+            (
+                AIMessageChunk(content="another minute."),
+                {"langgraph_node": "answer_cooking_question"},
+            ),
+        ),
+        (
+            "updates",
+            {
+                "answer_cooking_question": {
+                    "messages": [AIMessage(content="Give it another minute.")]
+                }
+            },
+        ),
+    ]
+
+    response = await client.get(
+        f"/chat/sessions/{session_id}/stream",
+        params={"message": "is this brown enough?", "step_index": 2},
+    )
+
+    frames = _frames(response.text)
+    tokens = [payload["text"] for name, payload in frames if name == "token"]
+    assert tokens == ["Give it ", "another minute."]
+    (done,) = [payload for name, payload in frames if name == "done"]
+    assert done["reply"] == "Give it another minute."
+    assert done["interrupted"] is False
+
+
+async def test_a_cooking_turn_persists_an_ordinary_text_reply(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    # No new message kind: the answer is a sentence in the transcript, and
+    # nothing about the turn produces a card.
+    fake_agent.chunks = [
+        (
+            "updates",
+            {
+                "answer_cooking_question": {
+                    "messages": [AIMessage(content="Give it another minute.")]
+                }
+            },
+        ),
+    ]
+
+    await client.get(
+        f"/chat/sessions/{session_id}/stream",
+        params={"message": "is this brown enough?", "step_index": 2},
+    )
+
+    transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
+    assert [m["kind"] for m in transcript["messages"]] == ["text", "text"]
+    assert transcript["messages"][-1]["content"] == "Give it another minute."
+
+
+async def test_a_cooking_turn_writes_no_cards_at_all(
+    client: httpx.AsyncClient, session_id: uuid.UUID, fake_agent: FakeAgentGraph
+) -> None:
+    """The derailment this whole path exists to prevent, as an assertion.
+
+    Before CUE-120 this turn was classified `RECIPE`, which re-asked the
+    checklist and recomposed the cart. A `checklist`, `cart_ready` or `recipe`
+    message here is that bug coming back.
+    """
+    from tests.chat.test_router import RECIPE
+
+    fake_agent.recipe = RECIPE
+    fake_agent.chunks = [
+        (
+            "updates",
+            {
+                "answer_cooking_question": {
+                    "messages": [AIMessage(content="Give it another minute.")]
+                }
+            },
+        ),
+    ]
+
+    await client.get(
+        f"/chat/sessions/{session_id}/stream",
+        params={"message": "is this brown enough?", "step_index": 2},
+    )
+
+    transcript = (await client.get(f"/chat/sessions/{session_id}")).json()
+    kinds = {m["kind"] for m in transcript["messages"]}
+    assert not kinds & {"checklist", "cart_ready", "recipe"}

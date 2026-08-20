@@ -61,7 +61,7 @@ class ChatMessage(CreatedAtMixin, Base):
     __table_args__ = (
         CheckConstraint("role IN ('user', 'assistant')", name="role_allowed"),
         CheckConstraint(
-            "kind IN ('text', 'image', 'checklist', 'cart_ready')",
+            "kind IN ('text', 'image', 'checklist', 'cart_ready', 'recipe')",
             name="kind_allowed",
         ),
         CheckConstraint(
@@ -84,7 +84,7 @@ class ChatMessage(CreatedAtMixin, Base):
     )
     content: Mapped[str | None] = mapped_column(Text)
     # kind='image': the Supabase Storage object path (image bytes are not stored
-    # in Postgres). kind='checklist'/'cart_ready': the rendered card. Never
-    # filtered, joined, or aggregated on - anything we query lives in
+    # in Postgres). kind='checklist'/'cart_ready'/'recipe': the rendered card.
+    # Never filtered, joined, or aggregated on - anything we query lives in
     # cart_plan_items.
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

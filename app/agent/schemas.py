@@ -26,19 +26,57 @@ class ScratchComponent(BaseModel):
     constituent_names: list[str] = Field(min_length=2)
 
 
+class RecipeStep(BaseModel):
+    """One step of a generated recipe's method, as the user cooks it.
+
+    `title` is the step's heading ("Soften the onions") and `instructions` are
+    the one to four short imperative lines under it. The split is what lets the
+    recipe card render a numbered heading per step and cooking mode show one
+    card at a time, rather than re-chopping a prose blob client-side.
+
+    `duration_seconds` is set **only** where the step has a genuine timed or
+    unattended stretch - a simmer, a rest, a bake - because it is what cooking
+    mode's timer runs off. An untimed step ("chop the onions") leaves it
+    `None`: a guessed number would start a countdown the recipe never asked
+    for, which is worse than that card having no timer. Constrained to `> 0`
+    for the same reason - a zero-second timer is not a timer, and accepting one
+    would put a countdown on a card that has nothing to count.
+    """
+
+    title: str = Field(min_length=1)
+    instructions: list[str] = Field(min_length=1)
+    duration_seconds: int | None = Field(default=None, gt=0)
+
+
 class GeneratedRecipe(BaseModel):
     """A structured, LLM-generated recipe for a given dish name.
 
     `method_summary` is deliberately brief prose rather than full step-by-step
     instructions - per R1.2 it exists as the hallucination backstop (forcing
     the model to reconcile ingredients against a coherent method) rather than
-    as user-facing cooking instructions.
+    as user-facing cooking instructions. `steps` does not replace it: the
+    summary is still that backstop, and it is what the reveal card shows as its
+    clipped preview.
+
+    `steps` is the user-facing method, in cooking order, and is required
+    (`min_length=1`). Both intake paths hold to that, the photo path included:
+    a photo that is not a recipe at all returns an empty `ingredients` list and
+    a *single explanatory step*, rather than no steps at all, so everything
+    downstream can rely on one invariant instead of branching on an empty list.
+    See `_PHOTO_SYSTEM_PROMPT` in `app/agent/nodes/recipe.py`.
+
+    `servings` and `difficulty` back the card's meta line ("Serves 2 · 35 min ·
+    Easy"). Both are optional and nothing downstream requires them: the model
+    omits either rather than inventing one, and the card drops that segment.
     """
 
     dish_name: str
     estimated_time_minutes: int
     ingredients: list[RecipeIngredient]
     method_summary: str
+    steps: list[RecipeStep] = Field(min_length=1)
+    servings: int | None = Field(default=None, gt=0)
+    difficulty: str | None = None
     scratch_components: list[ScratchComponent] = Field(default_factory=list)
 
 
@@ -103,12 +141,19 @@ class TurnIntent(StrEnum):
     classifier that returns an unrecognized label must fail validation and be
     handled as malformed, never coerced into a path that spends a model call
     or touches the user's cart.
+
+    `COOKING_QUESTION` is the mid-cook path (CUE-120). It exists because the
+    alternative is worse than a missing feature: without it, "is this brown
+    enough?" is classified `RECIPE`, which regenerates the recipe, re-asks the
+    checklist and recomposes the cart - wiping the cooking session the user is
+    standing in front of.
     """
 
     OUT_OF_SCOPE = "out_of_scope"
     RECIPE = "recipe"
     PHOTO = "photo"
     ORDER_STATUS = "order_status"
+    COOKING_QUESTION = "cooking_question"
 
 
 class TurnClassification(BaseModel):

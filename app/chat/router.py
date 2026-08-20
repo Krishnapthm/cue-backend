@@ -141,12 +141,22 @@ async def stream(
     session: DbSession,
     graph: AgentGraph,
     message: str = Query(min_length=1, description="The user's turn."),
+    step_index: int | None = Query(
+        default=None,
+        ge=1,
+        description=(
+            "The 1-based recipe step the user is looking at in cooking mode. "
+            "Sent while cooking so the turn is answered about that step "
+            "instead of being treated as a new dish."
+        ),
+    ),
 ) -> StreamingResponse:
     """Stream one user turn, event by event, as the agent works through it.
 
     A GET with the turn in the query string, because that is what `EventSource`
     can issue - the POST message endpoint stays for clients that want the whole
-    turn in one payload.
+    turn in one payload. `step_index` rides along in the query string for the
+    same reason: `EventSource` cannot send a body.
 
     Ownership is checked before the response starts, so an unauthorized
     request still 404s properly. Once the first byte is out the status code is
@@ -158,7 +168,10 @@ async def stream(
     """
     await service.get_session(session, user.id, session_id)
     request = CreateMessageRequest(
-        role=MessageRole.USER, kind=MessageKind.TEXT, content=message
+        role=MessageRole.USER,
+        kind=MessageKind.TEXT,
+        content=message,
+        step_index=step_index,
     )
     return StreamingResponse(
         _sse_frames(session, graph, user, session_id, request),

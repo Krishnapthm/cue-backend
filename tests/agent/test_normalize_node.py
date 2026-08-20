@@ -28,6 +28,7 @@ from app.agent.schemas import (
     IngredientStatus,
     NormalizedIngredient,
     RecipeIngredient,
+    RecipeStep,
 )
 from app.agent.state import AgentState
 from app.models.pantry import PantryItem
@@ -42,6 +43,12 @@ def _recipe(ingredients: list[RecipeIngredient]) -> GeneratedRecipe:
         estimated_time_minutes=10,
         ingredients=ingredients,
         method_summary="Combine everything.",
+        steps=[
+            RecipeStep(
+                title="Cook it",
+                instructions=["Combine everything and cook."],
+            )
+        ],
     )
 
 

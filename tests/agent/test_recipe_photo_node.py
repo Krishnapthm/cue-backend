@@ -19,7 +19,7 @@ from langchain_core.exceptions import OutputParserException
 from app.agent.config import AgentSettings, ModelRole
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.nodes import recipe as recipe_node
-from app.agent.schemas import GeneratedRecipe, RecipeIngredient
+from app.agent.schemas import GeneratedRecipe, RecipeIngredient, RecipeStep
 from app.agent.state import AgentState
 from app.agent.storage import SupabaseImageStore
 
@@ -89,6 +89,19 @@ def _recipe(dish_name: str = "grandma's lasagna") -> GeneratedRecipe:
             RecipeIngredient(name="tomato sauce", quantity=400, unit="ml"),
         ],
         method_summary="Layer pasta, meat sauce, and cheese; bake until golden.",
+        steps=[
+            RecipeStep(
+                title="Brown the meat",
+                instructions=["Brown the mince in a wide pan."],
+            ),
+            RecipeStep(
+                title="Bake",
+                instructions=["Layer the sheets and sauce.", "Bake until golden."],
+                duration_seconds=2400,
+            ),
+        ],
+        servings=4,
+        difficulty="Medium",
     )
 
 
@@ -169,6 +182,12 @@ async def test_parse_recipe_photo_node_non_recipe_image_flows_through_unchanged(
         estimated_time_minutes=0,
         ingredients=[],
         method_summary="No recipe was recognized in this image.",
+        steps=[
+            RecipeStep(
+                title="Nothing recognized",
+                instructions=["No recipe was recognized in this image."],
+            )
+        ],
     )
     _stub_chat_model(monkeypatch, [non_recipe_result])
     _stub_image_store(monkeypatch)

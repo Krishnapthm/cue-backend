@@ -14,11 +14,12 @@ from typing import Any
 import pytest
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage
+from pydantic import ValidationError
 
 from app.agent.config import ModelRole
 from app.agent.exceptions import RecipeGenerationError
 from app.agent.nodes import recipe as recipe_node
-from app.agent.schemas import GeneratedRecipe, RecipeIngredient
+from app.agent.schemas import GeneratedRecipe, RecipeIngredient, RecipeStep
 from app.agent.state import AgentState
 
 
@@ -68,6 +69,19 @@ def _recipe(dish_name: str = "pasta aglio e olio") -> GeneratedRecipe:
             RecipeIngredient(name="olive oil", quantity=60, unit="ml"),
         ],
         method_summary="Boil the pasta, fry sliced garlic in olive oil, toss together.",
+        steps=[
+            RecipeStep(
+                title="Boil the pasta",
+                instructions=["Salt the water heavily.", "Cook until al dente."],
+                duration_seconds=540,
+            ),
+            RecipeStep(
+                title="Fry the garlic",
+                instructions=["Slice the garlic thin.", "Fry gently in the oil."],
+            ),
+        ],
+        servings=2,
+        difficulty="Easy",
     )
 
 
@@ -127,6 +141,13 @@ async def test_generate_recipe_node_obscure_dish_still_returns_recipe(
         estimated_time_minutes=45,
         ingredients=[RecipeIngredient(name="assorted vegetables")],
         method_summary="Simmer everything together until tender.",
+        steps=[
+            RecipeStep(
+                title="Simmer everything",
+                instructions=["Cover and simmer until tender."],
+                duration_seconds=2700,
+            )
+        ],
     )
     _stub_chat_model(monkeypatch, [coarse_recipe])
 
@@ -208,6 +229,7 @@ def test_render_recipe_omits_a_missing_quantity() -> None:
             RecipeIngredient(name="ice", quantity=3),
         ],
         method_summary="Dissolve.",
+        steps=[RecipeStep(title="Dissolve", instructions=["Stir until dissolved."])],
     )
 
     rendered = recipe_node.render_recipe(recipe)
@@ -223,6 +245,7 @@ def test_render_recipe_formats_fractional_quantities() -> None:
         estimated_time_minutes=2,
         ingredients=[RecipeIngredient(name="vinegar", quantity=1.5, unit="tbsp")],
         method_summary="Whisk.",
+        steps=[RecipeStep(title="Whisk", instructions=["Whisk it."])],
     )
 
     # Whole numbers lose the .0, but a real fraction is preserved.
@@ -235,9 +258,120 @@ def test_render_recipe_handles_an_empty_ingredient_list() -> None:
         estimated_time_minutes=0,
         ingredients=[],
         method_summary="Nothing recipe-related was recognized.",
+        steps=[
+            RecipeStep(
+                title="Nothing recognized",
+                instructions=["Nothing recipe-related was recognized."],
+            )
+        ],
     )
 
     rendered = recipe_node.render_recipe(recipe)
 
     assert "No ingredients were identified" in rendered
     assert "Ingredients:" not in rendered
+
+
+def test_generated_recipe_requires_at_least_one_step() -> None:
+    # `steps` is the whole point of CUE-116, and both features downstream (the
+    # reveal card, cooking mode) have nothing to render without it. A model
+    # that omits it is a malformed structured output, which the node already
+    # knows how to retry - so the floor belongs in the schema, not in a
+    # defensive check at every reader.
+    with pytest.raises(ValidationError):
+        GeneratedRecipe(
+            dish_name="pasta",
+            estimated_time_minutes=20,
+            ingredients=[],
+            method_summary="Boil.",
+            steps=[],
+        )
+
+
+def test_recipe_step_requires_at_least_one_instruction_line() -> None:
+    with pytest.raises(ValidationError):
+        RecipeStep(title="Soften the onions", instructions=[])
+
+
+def test_recipe_step_rejects_a_zero_second_timer() -> None:
+    # A zero-second timer is not a timer; `None` is how an untimed step says so.
+    with pytest.raises(ValidationError):
+        RecipeStep(title="Chop", instructions=["Chop the onions."], duration_seconds=0)
+
+
+async def test_generate_recipe_node_carries_steps_onto_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe = _recipe()
+    _stub_chat_model(monkeypatch, [recipe])
+
+    update = await recipe_node.generate_recipe_node(_state("pasta aglio e olio"))
+
+    steps = update["recipe"].steps
+    assert [step.title for step in steps] == ["Boil the pasta", "Fry the garlic"]
+    assert all(step.instructions for step in steps)
+    # A timed step keeps its duration; an untimed one stays null rather than
+    # guessing a number cooking mode would then count down.
+    assert steps[0].duration_seconds == 540
+    assert steps[1].duration_seconds is None
+
+
+async def test_generate_recipe_node_carries_the_cards_meta_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_chat_model(monkeypatch, [_recipe()])
+
+    update = await recipe_node.generate_recipe_node(_state("pasta aglio e olio"))
+
+    assert update["recipe"].servings == 2
+    assert update["recipe"].difficulty == "Easy"
+
+
+async def test_generate_recipe_node_accepts_a_recipe_with_no_meta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `servings` and `difficulty` are absent-safe: the model omits either
+    # rather than inventing one, and nothing downstream requires them.
+    recipe = GeneratedRecipe(
+        dish_name="toast",
+        estimated_time_minutes=3,
+        ingredients=[RecipeIngredient(name="bread", quantity=2, unit="slice")],
+        method_summary="Toast the bread.",
+        steps=[RecipeStep(title="Toast", instructions=["Toast the bread."])],
+    )
+    _stub_chat_model(monkeypatch, [recipe])
+
+    update = await recipe_node.generate_recipe_node(_state("toast"))
+
+    assert update["recipe"].servings is None
+    assert update["recipe"].difficulty is None
+
+
+def test_render_recipe_still_shows_only_the_summary() -> None:
+    # `render_recipe` is unchanged by CUE-116 on purpose: steps reach the user
+    # through the recipe card (CUE-118), never through the chat text, so the
+    # reply must not start duplicating them.
+    rendered = recipe_node.render_recipe(_recipe())
+
+    assert "Boil the pasta, fry sliced garlic" in rendered
+    assert "Fry the garlic" not in rendered
+    assert "Salt the water heavily" not in rendered
+
+
+def test_both_prompts_ask_for_steps_and_a_conditional_timer() -> None:
+    for prompt in (recipe_node._SYSTEM_PROMPT, recipe_node._PHOTO_SYSTEM_PROMPT):
+        assert "steps" in prompt
+        assert "duration_seconds" in prompt
+        # The timer is opt-in per step, and the prompt has to say so - a model
+        # that guesses a duration on every step is the failure this rules out.
+        assert "ONLY" in prompt
+        assert "null" in prompt
+
+
+def test_the_photo_prompt_keeps_one_step_when_the_photo_is_not_a_recipe() -> None:
+    # `steps` stays min_length=1 on the photo path, so the "not a recipe at
+    # all" branch has to be told to emit one explanatory step rather than none.
+    prompt = recipe_node._PHOTO_SYSTEM_PROMPT
+
+    assert "exactly ONE step" in prompt
+    assert "Never return an empty steps list" in prompt

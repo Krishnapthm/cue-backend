@@ -24,6 +24,7 @@ from app.agent.graph import PROSE_NODES, CueGraph, thread_config
 from app.agent.schemas import (
     CartReport,
     ChecklistDecision,
+    GeneratedRecipe,
     MatchResult,
     ScratchChoiceDecision,
 )
@@ -44,6 +45,7 @@ from app.chat.schemas import (
     MessageKind,
     MessageRole,
     PendingInterrupt,
+    RecipeCardPayload,
     RecoveryAction,
     SessionAgentState,
     StageEvent,
@@ -80,6 +82,28 @@ def _interrupt_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         return None
     payload = getattr(interrupts[0], "value", None)
     return payload if isinstance(payload, dict) else None
+
+
+def _recipe(value: Any) -> GeneratedRecipe | None:
+    """Read a `recipe` state value, whatever shape it comes back in.
+
+    Accepted from both shapes for the reason `_cart_report` is: state replayed
+    through the checkpointer arrives as plain JSON, state straight off an
+    `ainvoke` is still the model instance.
+
+    A recipe that no longer validates is dropped rather than raised on. This
+    runs *after* the cart has been pushed to Swiggy and the `cart_ready`
+    message written, so failing the turn here would report a completed order as
+    a failure over a card the user has not seen yet. A session whose recipe
+    predates a schema change is exactly this case.
+    """
+    if value is None:
+        return None
+    try:
+        return GeneratedRecipe.model_validate(value)
+    except ValidationError:
+        logger.warning("Ignoring an unreadable recipe on the turn's state.")
+        return None
 
 
 def _cart_report(value: Any) -> CartReport | None:
@@ -307,12 +331,19 @@ def _turn_state(
     It is written on every turn, `None` included: the field survives in the
     checkpoint, so leaving a previous turn's path in place would route the next
     text turn back into the vision path and re-read a stale photo.
+
+    `active_step_index` is carried the same way and for the same reason
+    (CUE-120). It is what makes a turn eligible for the cooking path, and
+    leaving a previous turn's value in place would keep offering that path
+    after the user has closed cooking mode - so a turn sent without one clears
+    it rather than inheriting it.
     """
     return {
         "session_id": str(session_id),
         "user_id": user_id,
         "messages": [HumanMessage(content=request.content or "")],
         "image_object_path": request.image_object_path(),
+        "active_step_index": request.step_index,
     }
 
 
@@ -409,6 +440,37 @@ async def _persist_cart_report(
             kind=MessageKind.CART_READY,
             content=report.summary,
             payload=report.model_dump(mode="json"),
+        ),
+    )
+
+
+async def _persist_recipe_card(
+    session: AsyncSession,
+    user_id: int,
+    session_id: uuid.UUID,
+    recipe: GeneratedRecipe,
+) -> ChatMessage:
+    """Append the turn's recipe to the transcript as a `RECIPE` message.
+
+    Written here rather than in a graph node for the same reason the checklist
+    and the cart card are: every transcript write belongs to one owner, and a
+    node reaching into `chat.service` would close an import cycle through
+    `agent.graph`.
+
+    It is the last message of the turn, immediately after `cart_ready`, which
+    is the product framing - "once the cart is ready, show the full recipe".
+    `content` carries the dish name so a client that renders nothing but text
+    still says something useful; `payload` carries the card.
+    """
+    return await append_message(
+        session,
+        user_id,
+        session_id,
+        CreateMessageRequest(
+            role=MessageRole.ASSISTANT,
+            kind=MessageKind.RECIPE,
+            content=recipe.dish_name,
+            payload=RecipeCardPayload.from_recipe(recipe).model_dump(mode="json"),
         ),
     )
 
@@ -566,6 +628,13 @@ async def run_turn(
         # A cart turn ends on its card, not on prose. This is also the only
         # thing a resumed turn produces, which is why it is checked first.
         cart_message = await _persist_cart_report(session, user_id, session_id, report)
+        recipe = _recipe(result.get("recipe"))
+        if recipe is not None:
+            # The recipe card is appended *after* the cart card, and it is not
+            # the turn's reply: the cart is still what the turn answered with,
+            # and the recipe is the durable copy cooking mode reads back on a
+            # cold start.
+            await _persist_recipe_card(session, user_id, session_id, recipe)
         return user_message, cart_message
 
     if answer is not None:
@@ -663,6 +732,33 @@ def _messages_in(update: Any) -> list[BaseMessage]:
     return messages if isinstance(messages, list) else []
 
 
+async def _checkpointed_recipe(
+    graph: CueGraph, session_id: uuid.UUID
+) -> GeneratedRecipe | None:
+    """Read the session's recipe off the checkpoint.
+
+    The streaming path needs this and the blocking one does not, because
+    `astream` in `updates` mode yields *deltas*: the recipe was written by
+    `generate_recipe` on the turn that paused at the checklist, and the turn
+    that actually produces the cart is the resume, which re-runs no node that
+    touches it. `ainvoke` returns the whole final state, so `run_turn` already
+    has it.
+
+    One read, once per cart turn, on the same handle `pending_interrupt` uses.
+    It deliberately does not raise: a checkpoint that cannot be read costs the
+    user a recipe card on an order that was still placed successfully.
+
+    Args:
+        graph: The compiled agent graph for this request.
+        session_id: The session being run; its `str()` is the `thread_id`.
+
+    Returns:
+        The recipe on the session's state, or `None` when there is none.
+    """
+    snapshot = await graph.aget_state(thread_config(str(session_id)))
+    return _recipe(snapshot.values.get("recipe") if snapshot.values else None)
+
+
 async def stream_turn(
     session: AsyncSession,
     graph: CueGraph,
@@ -727,6 +823,7 @@ async def stream_turn(
     replies: list[BaseMessage] = []
     interrupt_payload: dict[str, Any] | None = None
     report: CartReport | None = None
+    recipe: GeneratedRecipe | None = None
 
     try:
         async for stream_mode, chunk in graph.astream(
@@ -750,6 +847,7 @@ async def stream_turn(
                             report = (
                                 _cart_report(node_update.get("cart_report")) or report
                             )
+                            recipe = _recipe(node_update.get("recipe")) or recipe
                     for update_event in _updates_events(updates):
                         if isinstance(update_event, InterruptEvent) and isinstance(
                             update_event.payload, dict
@@ -780,6 +878,9 @@ async def stream_turn(
         # checklist is: the SSE event alone dies with the connection, and the
         # transcript has to still render the cart on a cold start.
         cart_message = await _persist_cart_report(session, user_id, session_id, report)
+        recipe = recipe or await _checkpointed_recipe(graph, session_id)
+        if recipe is not None:
+            await _persist_recipe_card(session, user_id, session_id, recipe)
         yield DoneEvent(reply=report.summary, message_id=cart_message.id)
         return
 

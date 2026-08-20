@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent import graph as graph_module
 from app.agent.context import CueContext
 from app.agent.exceptions import RecipeGenerationError
+from app.agent.nodes import cooking as cooking_module
 from app.agent.nodes import order_status as order_status_module
 from app.agent.nodes import recipe as recipe_module
 from app.agent.nodes import route as route_module
@@ -34,6 +35,7 @@ from app.agent.schemas import (
     GeneratedRecipe,
     IngredientStatus,
     RecipeIngredient,
+    RecipeStep,
     TurnClassification,
     TurnIntent,
 )
@@ -151,6 +153,12 @@ def _recipe(dish_name: str = "paneer butter masala") -> GeneratedRecipe:
             RecipeIngredient(name="salt"),
         ],
         method_summary="Simmer the tomato gravy, add butter, fold in paneer.",
+        steps=[
+            RecipeStep(
+                title="Cook it",
+                instructions=["Combine everything and cook."],
+            )
+        ],
     )
 
 
@@ -229,6 +237,7 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
         "schedule_title",
         "parse_recipe_photo",
         "order_status",
+        "answer_cooking_question",
         "normalize_ingredients",
         "find_scratch_component",
         "choose_scratch_component",
@@ -236,7 +245,7 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
     } <= set(drawable.nodes)
     edges = {(e.source, e.target) for e in drawable.edges}
     assert ("__start__", "route_turn") in edges
-    for branch in ("order_status", "refuse"):
+    for branch in ("order_status", "answer_cooking_question", "refuse"):
         assert (branch, "__end__") in edges
     # The photo path converges on the text path instead of ending on its own.
     assert ("parse_recipe_photo", "generate_recipe") in edges
@@ -646,3 +655,92 @@ def test_the_off_box_nodes_retry_and_the_local_ones_do_not() -> None:
         # LangGraph accepts one policy or a sequence of them; we set exactly one.
         policies = [policy] if isinstance(policy, RetryPolicy) else list(policy)
         assert [each.max_attempts for each in policies] == [3]
+
+
+# --- the cooking branch (CUE-120) -------------------------------------------
+
+
+def test_the_cooking_node_is_a_terminal_prose_branch() -> None:
+    # One model call, one message, straight to END - and its tokens may stream,
+    # which is what `PROSE_NODES` membership grants.
+    drawable = graph_module.build_graph().compile().get_graph()
+    edges = {(e.source, e.target) for e in drawable.edges}
+
+    assert ("answer_cooking_question", "__end__") in edges
+    assert ("answer_cooking_question", "generate_recipe") not in edges
+    assert "answer_cooking_question" in graph_module.PROSE_NODES
+
+
+async def test_a_cooking_question_reaches_the_cooking_branch(
+    stub_models: dict[str, _CountingRunnable], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn is answered without re-entering the recipe path.
+
+    The recipe model counter is the assertion that matters: before CUE-120 this
+    turn spent a recipe call, regenerated the recipe and recomposed the cart.
+    """
+    stub_models["router"].results.append(_intent(TurnIntent.COOKING_QUESTION))
+    cooking = _ProseRunnable([AIMessage(content="Give it another minute.")])
+    monkeypatch.setattr(cooking_module, "get_chat_model", lambda _role: cooking)
+
+    state = _state("is this brown enough?")
+    state["recipe"] = _recipe()
+    state["active_step_index"] = 1
+
+    graph = graph_module.build_graph().compile()
+
+    result = await graph.ainvoke(state, context=_context())
+
+    assert result["messages"][-1].content == "Give it another minute."
+    assert stub_models["recipe"].calls == 0
+
+
+async def test_a_cooking_question_leaves_the_cart_untouched(
+    stub_models: dict[str, _CountingRunnable], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the branch, asserted against the graph's own state.
+
+    `cart_plan_id`, `compose_result` and `have_marks` all survive in the
+    checkpoint across turns, so a question asked mid-cook that recomposed any
+    of them would mutate the user's real Swiggy cart.
+    """
+    stub_models["router"].results.append(_intent(TurnIntent.COOKING_QUESTION))
+    cooking = _ProseRunnable([AIMessage(content="Give it another minute.")])
+    monkeypatch.setattr(cooking_module, "get_chat_model", lambda _role: cooking)
+
+    state = _state("is this brown enough?")
+    state["recipe"] = _recipe()
+    state["active_step_index"] = 1
+    state["cart_plan_id"] = 7
+    state["have_marks"] = {"salt"}
+    state["cart_report"] = None
+
+    graph = graph_module.build_graph().compile()
+
+    result = await graph.ainvoke(state, context=_context())
+
+    assert result["cart_plan_id"] == 7
+    assert result["have_marks"] == {"salt"}
+    assert result.get("cart_report") is None
+    assert result["recipe"] == _recipe()
+
+
+async def test_a_cooking_question_never_reaches_the_checklist(
+    stub_models: dict[str, _CountingRunnable], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The checklist is an interrupt, so a turn that reached it would *pause* -
+    # leaving the user staring at a shopping list they did not ask for while
+    # their pan burns.
+    stub_models["router"].results.append(_intent(TurnIntent.COOKING_QUESTION))
+    cooking = _ProseRunnable([AIMessage(content="Give it another minute.")])
+    monkeypatch.setattr(cooking_module, "get_chat_model", lambda _role: cooking)
+
+    state = _state("is this brown enough?")
+    state["recipe"] = _recipe()
+    state["active_step_index"] = 1
+
+    graph = graph_module.build_graph().compile()
+
+    result = await graph.ainvoke(state, context=_context())
+
+    assert "__interrupt__" not in result

@@ -1,4 +1,4 @@
-"""`route_turn`: the four intents, the branch each takes, and failing closed.
+"""`route_turn`: the five intents, the branch each takes, and failing closed.
 
 These are unit tests - no real model is called. `get_chat_model` is
 monkeypatched to a fake `BaseChatModel`-shaped object, mirroring
@@ -26,7 +26,10 @@ from app.agent.context import CueContext
 from app.agent.nodes import route as route_module
 from app.agent.nodes.route import route_turn
 from app.agent.schemas import (
+    GeneratedRecipe,
     GuardrailDecision,
+    RecipeIngredient,
+    RecipeStep,
     ScopeVerdict,
     TurnClassification,
     TurnIntent,
@@ -105,7 +108,13 @@ def _runtime() -> Runtime[CueContext]:
     )
 
 
-def _state(message: str, image_object_path: str | None = None) -> AgentState:
+def _state(
+    message: str,
+    image_object_path: str | None = None,
+    *,
+    step_index: int | None = None,
+    recipe: GeneratedRecipe | None = None,
+) -> AgentState:
     state: AgentState = {
         "session_id": "session-1",
         "user_id": 1,
@@ -113,7 +122,29 @@ def _state(message: str, image_object_path: str | None = None) -> AgentState:
     }
     if image_object_path is not None:
         state["image_object_path"] = image_object_path
+    if step_index is not None:
+        state["active_step_index"] = step_index
+    if recipe is not None:
+        state["recipe"] = recipe
     return state
+
+
+def _recipe() -> GeneratedRecipe:
+    return GeneratedRecipe(
+        dish_name="paneer butter masala",
+        estimated_time_minutes=35,
+        ingredients=[RecipeIngredient(name="paneer", quantity=250, unit="g")],
+        method_summary="Simmer the gravy, fold in the paneer.",
+        steps=[
+            RecipeStep(title="Soften the onions", instructions=["Fry until golden."]),
+            RecipeStep(title="Simmer the gravy", instructions=["Simmer."]),
+        ],
+    )
+
+
+def _cooking_state(message: str, step_index: int = 2) -> AgentState:
+    """A turn eligible for the cooking path: a step index *and* a recipe."""
+    return _state(message, step_index=step_index, recipe=_recipe())
 
 
 def _classified(intent: TurnIntent, reason: str = "because") -> TurnClassification:
@@ -368,3 +399,152 @@ async def test_empty_messages_raises_value_error(
 
     with pytest.raises(ValueError, match="no messages"):
         await route_turn(state, _runtime())
+
+
+# --- the cooking branch (CUE-120) -------------------------------------------
+
+
+async def test_a_cooking_question_routes_to_the_cooking_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _stub(monkeypatch, [_classified(TurnIntent.COOKING_QUESTION)])
+
+    command = await route_turn(_cooking_state("is this brown enough?"), _runtime())
+
+    assert command.goto == "answer_cooking_question"
+    assert (command.update or {})["turn_intent"] is TurnIntent.COOKING_QUESTION
+    # The turn is in scope, so the guardrail verdict says so - the branch does
+    # not bypass the scope framing traces are read through.
+    assert (command.update or {})["guardrail"].verdict is ScopeVerdict.IN_SCOPE
+    assert stub.roles == [ModelRole.ROUTER]
+
+
+async def test_the_cooking_intent_is_offered_only_on_an_eligible_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The classifier is not told the intent exists unless it is reachable.
+
+    A label the model was never offered cannot be hallucinated into a branch
+    with no recipe to answer from - which is why eligibility shapes the prompt
+    rather than being checked only after the fact.
+    """
+    stub = _stub(monkeypatch, [_classified(TurnIntent.COOKING_QUESTION)])
+
+    await route_turn(_cooking_state("is this brown enough?"), _runtime())
+
+    system = str(stub.prompts[0][0].content)
+    assert "`cooking_question`" in system
+    assert "PRECEDENCE" in system
+
+
+@pytest.mark.parametrize(
+    ("step_index", "with_recipe"),
+    [
+        # A step index with no recipe: nothing to answer about.
+        (2, False),
+        # A recipe with no step index: the user is not in cooking mode.
+        (None, True),
+        # Neither.
+        (None, False),
+    ],
+)
+async def test_an_ineligible_turn_is_never_offered_the_cooking_intent(
+    monkeypatch: pytest.MonkeyPatch, step_index: int | None, with_recipe: bool
+) -> None:
+    stub = _stub(monkeypatch, [_classified(TurnIntent.RECIPE)])
+    state = _state(
+        "paneer butter masala",
+        step_index=step_index,
+        recipe=_recipe() if with_recipe else None,
+    )
+
+    command = await route_turn(state, _runtime())
+
+    assert "`cooking_question`" not in str(stub.prompts[0][0].content)
+    assert command.goto == "generate_recipe"
+
+
+async def test_the_cooking_intent_on_an_ineligible_turn_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client cannot talk the router into a path its turn cannot take.
+
+    The intent was never described to the model on this turn, so returning it
+    means the classifier misread the prompt - the same situation as the photo
+    path with no photo, and the same answer.
+    """
+    _stub(monkeypatch, [_classified(TurnIntent.COOKING_QUESTION)])
+
+    command = await route_turn(_state("is this brown enough?"), _runtime())
+
+    assert command.goto == "refuse"
+    assert (command.update or {})["turn_intent"] is TurnIntent.OUT_OF_SCOPE
+
+
+async def test_a_new_dish_while_cooking_still_routes_to_the_recipe_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Being mid-cook must not trap the user in the cooking branch.
+
+    The step context adds an option to the classifier's prompt; it does not
+    bypass the classification. A user who changes their mind gets their new
+    dish, cart and all.
+    """
+    _stub(monkeypatch, [_classified(TurnIntent.RECIPE)])
+
+    command = await route_turn(
+        _cooking_state("actually let's make pasta instead"), _runtime()
+    )
+
+    assert command.goto == "generate_recipe"
+    assert (command.update or {})["turn_intent"] is TurnIntent.RECIPE
+
+
+async def test_an_out_of_scope_turn_while_cooking_still_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub(monkeypatch, [_classified(TurnIntent.OUT_OF_SCOPE)])
+
+    command = await route_turn(_cooking_state(INJECTION), _runtime())
+
+    assert command.goto == "refuse"
+    assert (command.update or {})["turn_intent"] is TurnIntent.OUT_OF_SCOPE
+
+
+async def test_an_order_status_turn_while_cooking_still_routes_to_order_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub(monkeypatch, [_classified(TurnIntent.ORDER_STATUS)])
+
+    command = await route_turn(_cooking_state("where is my order"), _runtime())
+
+    assert command.goto == "order_status"
+
+
+async def test_a_photo_turn_while_cooking_still_takes_the_photo_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The photo check is deterministic and runs first, so an uploaded image
+    # wins over a step index - and spends no model call deciding that.
+    stub = _stub(monkeypatch, [])
+    state = _cooking_state("what is this")
+    state["image_object_path"] = "recipes/u1/8f2c.jpg"
+
+    command = await route_turn(state, _runtime())
+
+    assert command.goto == "parse_recipe_photo"
+    assert stub.roles == []
+
+
+async def test_the_cooking_turn_prompt_still_wraps_the_message_as_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The injection defence is not weakened by the extra intent: the turn is
+    # still delimited, untrusted data.
+    stub = _stub(monkeypatch, [_classified(TurnIntent.OUT_OF_SCOPE)])
+
+    await route_turn(_cooking_state(INJECTION), _runtime())
+
+    human = str(stub.prompts[0][1].content)
+    assert human.startswith(route_module._MESSAGE_OPEN)
+    assert human.endswith(route_module._MESSAGE_CLOSE)
