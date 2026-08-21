@@ -328,6 +328,14 @@ Sets one line's quantity.
 Removes one line. Takes `address_id` as a query parameter. Returns the same
 mutation result as the other cart endpoints.
 
+### DELETE /cart
+
+Removes every line, in one write. Takes `address_id` as a query parameter.
+Instamart has no separate clear-cart tool; this sends `update_cart` with an
+empty item list, which is how it expresses an emptied cart. Unlike the other
+mutating routes this does not merge - clearing is the one operation meant to
+discard everything.
+
 ## Orders
 
 All paths use the prefix `/orders`.

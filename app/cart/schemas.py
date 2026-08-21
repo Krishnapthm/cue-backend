@@ -67,10 +67,10 @@ class SelectedVariant(BaseModel):
 class ComposeCartResult(BaseModel):
     """Outcome of composing a `CartPlan` (R5.1/R5.4, CUE-16).
 
-    `cart` is the get_cart read-back (R5.2) and is only present when the
-    minimum order value was met - below it, the plan is still recorded (so
-    recompose history stays debuggable) but `update_cart` is never called,
-    since there is nothing checkout-able yet.
+    `cart` is the resulting server cart after `compose_cart` merges this
+    turn's selections onto it - present whenever there was anything
+    purchasable to merge, regardless of `below_minimum`, which is reporting
+    only (R5.4 no longer gates the write).
     """
 
     plan_id: int
