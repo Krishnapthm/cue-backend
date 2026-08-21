@@ -166,9 +166,8 @@ async def delete_cart(
 ) -> CartMutationResult:
     """Clear the whole cart and return the (empty) resulting cart.
 
-    Instamart has no dedicated clear-cart tool; this writes `update_cart`
-    with an empty item list, which is how its replace semantics express an
-    emptied cart. Unlike the other mutating routes, this is deliberately not
-    a merge - clearing is the one operation meant to discard everything.
+    Writes via Swiggy's dedicated `clear_cart` tool. Unlike the other
+    mutating routes, this is deliberately not a merge - clearing is the one
+    operation meant to discard everything.
     """
     return await service.clear_cart(session, user.id, address_id=address_id)

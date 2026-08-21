@@ -216,6 +216,30 @@ async def test_search_products_parses_the_real_shape_end_to_end(
     assert second.variants[1].rating is None
 
 
+def test_cart_line_item_flattens_a_nested_price_object() -> None:
+    """`get_cart` prices lines the same way `search_products` prices variants
+    (CUE-77's precedent) - a nested `{mrp, offerPrice}` object, not a bare
+    scalar. A cart line that doesn't flatten it parses with `price=None`,
+    which reads to the user as Rs 0 for every chat-composed item."""
+    line = {
+        "spinId": "spin-1",
+        "quantity": 2,
+        "price": {"mrp": 320, "offerPrice": 240},
+    }
+
+    cart = Cart.model_validate({"items": [line]})
+
+    assert cart.items[0].price == Decimal("240")
+
+
+def test_cart_line_item_still_accepts_a_scalar_price() -> None:
+    cart = Cart.model_validate(
+        {"items": [{"spinId": "spin-1", "quantity": 1, "price": "27.00"}]}
+    )
+
+    assert cart.items[0].price == Decimal("27.00")
+
+
 def test_cart_line_items_preserve_optional_variant_metadata() -> None:
     """Cart endpoint models expose metadata when Swiggy includes it."""
     both = {

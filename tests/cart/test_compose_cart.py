@@ -72,6 +72,43 @@ async def test_compose_cart_persists_the_plan_and_its_items(
     assert items[0].match_status == "matched"
 
 
+async def test_compose_cart_subtotal_reflects_a_realistically_nested_price(
+    db_session: AsyncSession,
+    linked_user: User,
+    chat_session: ChatSession,
+    mock_instamart_tool_call: InstamartToolCallStub,
+) -> None:
+    """Live `get_cart`/`update_cart` responses price lines as a nested
+    `{mrp, offerPrice}` object, the same shape `search_products` uses
+    (CUE-77's precedent). A cart that fails to flatten it parses every line
+    with `price=None`, so `subtotal` silently reads as 0 regardless of what
+    is actually in the cart."""
+    mock_instamart_tool_call.configure_text_envelope(
+        {
+            "success": True,
+            "data": {
+                "cart": {
+                    "items": [
+                        {
+                            "spinId": "spin-1",
+                            "quantity": 2,
+                            "price": {"mrp": 80, "offerPrice": 60},
+                        }
+                    ],
+                    "availablePaymentMethods": ["COD"],
+                }
+            },
+        }
+    )
+
+    result = await compose_cart(
+        db_session, linked_user.id, chat_session.id, "addr-1", [_variant()]
+    )
+
+    assert result.subtotal == Decimal("120.00")
+    assert result.below_minimum is False
+
+
 async def test_compose_cart_writes_the_full_cart_and_reads_it_back(
     db_session: AsyncSession,
     linked_user: User,

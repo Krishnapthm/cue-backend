@@ -110,6 +110,22 @@ class ProductRating(BaseModel):
     count: str
 
 
+def _flatten_price_value(value: Any) -> Any:
+    """Reduce Swiggy's nested price object to the price actually charged.
+
+    Live responses send `price` as `{mrp, offerPrice, unitLevelPrice}`, but
+    every consumer (variant selection, cart line totals, CUE-15) treats
+    `price` as a single Decimal. `offerPrice` is what the user pays, so it
+    wins; `mrp` is the fallback when nothing is discounted. A plain scalar
+    passes through untouched. Shared by `ProductVariant` and `CartLineItem`:
+    both are documented as nesting price the same way.
+    """
+    if isinstance(value, dict):
+        offer_price = value.get("offerPrice", value.get("offer_price"))
+        return offer_price if offer_price is not None else value.get("mrp")
+    return value
+
+
 class ProductVariant(BaseModel):
     """One purchasable variant of a search_products candidate (R4.1, R4.2).
 
@@ -144,18 +160,7 @@ class ProductVariant(BaseModel):
     @field_validator("price", mode="before")
     @classmethod
     def _flatten_price(cls, value: Any) -> Any:
-        """Reduce Swiggy's nested price object to the price actually charged.
-
-        Live responses send `price` as `{mrp, offerPrice, unitLevelPrice}`,
-        but every consumer (cheapest-variant selection and cart line totals,
-        CUE-15) treats `price` as a single Decimal. `offerPrice` is what the
-        user pays, so it wins; `mrp` is the fallback when nothing is
-        discounted. A plain scalar passes through untouched.
-        """
-        if isinstance(value, dict):
-            offer_price = value.get("offerPrice", value.get("offer_price"))
-            return offer_price if offer_price is not None else value.get("mrp")
-        return value
+        return _flatten_price_value(value)
 
 
 class Product(BaseModel):
@@ -201,6 +206,12 @@ class CartLineItem(BaseModel):
     spin_id: str = Field(alias="spinId")
     quantity: int
     price: Decimal | None = None
+
+    @field_validator("price", mode="before")
+    @classmethod
+    def _flatten_price(cls, value: Any) -> Any:
+        return _flatten_price_value(value)
+
     # Swiggy spells the line's name differently in different payloads -
     # `search_products` alone answers with `displayName` where the cart docs say
     # `productName` - and a line that parses unnamed reaches the user as a

@@ -13,7 +13,7 @@ from httpx import ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
-from app.instamart.constants import TOOL_GET_CART, TOOL_UPDATE_CART
+from app.instamart.constants import TOOL_CLEAR_CART, TOOL_GET_CART, TOOL_UPDATE_CART
 from app.instamart.exceptions import InstamartDomainError
 from app.main import app
 from app.models.cart import CartPlan
@@ -50,6 +50,7 @@ class FakeInstamart:
     drops: set[str] = field(default_factory=set)
     metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     writes: list[list[dict[str, Any]]] = field(default_factory=list)
+    clears: int = 0
 
     def _cart_payload(self) -> dict[str, Any]:
         return {
@@ -78,6 +79,10 @@ class FakeInstamart:
         await asyncio.sleep(0)
         if tool_name == TOOL_GET_CART:
             return self._cart_payload()
+        if tool_name == TOOL_CLEAR_CART:
+            self.clears += 1
+            self.items = {}
+            return {"message": "Cart cleared successfully."}
         if tool_name == TOOL_UPDATE_CART:
             requested = arguments["items"]
             self.writes.append(requested)

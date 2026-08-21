@@ -80,6 +80,24 @@ async def test_get_cart_reads_back_the_server_cart(
     assert cart.total == Decimal("54.00")
 
 
+async def test_clear_cart_calls_the_dedicated_tool_with_no_arguments(
+    db_session: AsyncSession,
+    linked_user: User,
+    mock_instamart_tool_call: InstamartToolCallStub,
+) -> None:
+    """Clearing goes through Swiggy's own `clear_cart` tool, not an empty
+    `update_cart` write - the latter is undocumented and Swiggy refuses it
+    in practice."""
+    mock_instamart_tool_call.configure(
+        result={"structuredContent": {"message": "Cart cleared successfully."}}
+    )
+
+    await service.clear_cart(db_session, linked_user.id)
+
+    (_, kwargs) = mock_instamart_tool_call.calls[0]
+    assert kwargs["json"]["params"] == {"name": "clear_cart", "arguments": {}}
+
+
 async def test_update_cart_raises_auth_error_when_not_linked(
     db_session: AsyncSession,
     user: User,
