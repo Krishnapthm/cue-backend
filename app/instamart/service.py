@@ -23,6 +23,7 @@ from app.instamart.constants import (
     DEFAULT_SEARCH_OFFSET,
     MAX_GET_ORDERS_COUNT,
     TOOL_CHECKOUT,
+    TOOL_CLEAR_CART,
     TOOL_CREATE_ADDRESS,
     TOOL_DELETE_ADDRESS,
     TOOL_GET_ADDRESSES,
@@ -220,6 +221,25 @@ async def get_cart(session: AsyncSession, user_id: int) -> Cart:
     data = await _call_authenticated(session, user_id, TOOL_GET_CART, {})
     raw_cart = data.get("cart", data) if isinstance(data, dict) else data
     return Cart.model_validate(raw_cart or {})
+
+
+async def clear_cart(session: AsyncSession, user_id: int) -> None:
+    """Remove every line from the server cart via Swiggy's dedicated tool.
+
+    `update_cart` with an empty `items` list looks like the natural way to
+    express an empty cart, but Swiggy documents a separate `clear_cart` tool
+    for exactly this and does not document an empty `items` array as valid
+    on `update_cart` - live testing bore that out (an empty write 422s).
+    `clear_cart` takes no parameters; the cart is read back separately by
+    callers that need the resulting (empty) state.
+
+    Raises:
+        InstamartAuthError: The Swiggy link is missing or expired (401).
+        InstamartTransportError: Swiggy was unreachable (502).
+        InstamartDomainError: Swiggy refused the clear (e.g. a precondition
+            like an order already in flight).
+    """
+    await _call_authenticated(session, user_id, TOOL_CLEAR_CART, {})
 
 
 async def checkout(

@@ -518,7 +518,8 @@ async def test_clear_does_not_read_the_cart_first(
 
     await authed_client.delete(f"/cart?addressId={ADDRESS_ID}")
 
-    assert fake_instamart.writes == [[]]
+    assert fake_instamart.clears == 1
+    assert fake_instamart.writes == []
 
 
 async def test_clear_of_an_already_empty_cart_is_a_no_op(

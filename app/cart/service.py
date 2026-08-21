@@ -30,9 +30,11 @@ back the cart API (CUE-80). Swiggy's `update_cart` *replaces* the cart, so
 every one of them but `clear_cart` is a read-merge-write against the current
 server cart - written once, here, so the four mutating routes cannot each
 invent their own version of it. `clear_cart` is the one exception: it
-discards the cart on purpose, so there is nothing to merge onto. See
-`_user_cart_lock` for the concurrency guarantee, which is deliberately
-per-process only.
+discards the cart on purpose, so there is nothing to merge onto, and it (plus
+`remove_item`'s last-line case) goes through Swiggy's dedicated `clear_cart`
+tool rather than an empty `update_cart` write, which Swiggy does not
+document and refuses in practice. See `_user_cart_lock` for the concurrency
+guarantee, which is deliberately per-process only.
 """
 
 from __future__ import annotations
@@ -648,13 +650,18 @@ async def remove_item(
 ) -> CartMutationResult:
     """Remove one line from the cart, leaving every other line untouched.
 
-    Removing the last line writes an empty item list, which is how
-    `update_cart`'s replace semantics express an empty cart.
+    Removing the last line would naively write an empty item list through
+    `update_cart`, but Swiggy does not document (and live testing shows it
+    refuses) an empty `items` array there. Swiggy's dedicated `clear_cart`
+    tool is the documented way to empty a cart, so the last-line case is
+    routed through it instead.
 
     Raises:
         CartItemNotFoundError: The cart holds no line for `spin_id` (404).
         InstamartAuthError: The Swiggy link is missing or expired (401).
         InstamartTransportError: Swiggy was unreachable (502).
+        InstamartDomainError: Swiggy refused the write (e.g. the last-line
+            case hitting a `clear_cart` precondition).
     """
     async with _user_cart_lock(user_id):
         current = await instamart_service.get_cart(session, user_id)
@@ -664,30 +671,39 @@ async def remove_item(
         remaining = _as_inputs(
             line for line in current.items if line.spin_id != spin_id
         )
-        cart = await instamart_service.update_cart(
-            session, user_id, address_id=address_id, items=remaining
-        )
+        if remaining:
+            cart = await instamart_service.update_cart(
+                session, user_id, address_id=address_id, items=remaining
+            )
+        else:
+            await instamart_service.clear_cart(session, user_id)
+            cart = await instamart_service.get_cart(session, user_id)
         return CartMutationResult(cart=await _named(session, user_id, cart))
 
 
 async def clear_cart(
     session: AsyncSession, user_id: int, *, address_id: str
 ) -> CartMutationResult:
-    """Remove every line from the cart in one write.
+    """Remove every line from the cart via Swiggy's dedicated `clear_cart` tool.
 
     Unlike `add_items`/`set_item_quantity`/`remove_item`, this never reads
     the current cart first: clearing is the one mutation meant to discard
-    everything, so there is nothing to merge onto. Instamart has no dedicated
-    clear/empty-cart tool - `update_cart`'s replace semantics mean an empty
-    item list *is* how an emptied cart is expressed, exactly as the last line
-    of `remove_item` already relies on.
+    everything, so there is nothing to merge onto. `address_id` is accepted
+    for API consistency with the other mutating routes even though the
+    underlying tool needs no address.
+
+    An earlier version of this wrote an empty `items` list through
+    `update_cart` - the natural-looking way to express an empty cart, but
+    undocumented and refused by Swiggy in practice (a bare 422 with no
+    caller-visible reason). `clear_cart` is the documented tool for this.
 
     Raises:
         InstamartAuthError: The Swiggy link is missing or expired (401).
         InstamartTransportError: Swiggy was unreachable (502).
+        InstamartDomainError: Swiggy refused the clear (e.g. a precondition
+            like an order already in flight).
     """
     async with _user_cart_lock(user_id):
-        cart = await instamart_service.update_cart(
-            session, user_id, address_id=address_id, items=[]
-        )
+        await instamart_service.clear_cart(session, user_id)
+        cart = await instamart_service.get_cart(session, user_id)
         return CartMutationResult(cart=await _named(session, user_id, cart))
