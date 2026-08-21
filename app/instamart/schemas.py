@@ -19,7 +19,14 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,16 +120,31 @@ class ProductRating(BaseModel):
 def _flatten_price_value(value: Any) -> Any:
     """Reduce Swiggy's nested price object to the price actually charged.
 
-    Live responses send `price` as `{mrp, offerPrice, unitLevelPrice}`, but
-    every consumer (variant selection, cart line totals, CUE-15) treats
-    `price` as a single Decimal. `offerPrice` is what the user pays, so it
-    wins; `mrp` is the fallback when nothing is discounted. A plain scalar
-    passes through untouched. Shared by `ProductVariant` and `CartLineItem`:
-    both are documented as nesting price the same way.
+    `search_products` sends `price` as `{mrp, offerPrice, unitLevelPrice}`,
+    and every consumer of a variant's price (variant selection, CUE-15)
+    treats `price` as a single Decimal. `offerPrice` is what the user pays,
+    so it wins; `mrp` is the fallback when nothing is discounted. A plain
+    scalar passes through untouched.
+
+    `get_cart` does not nest price this way at all - see `CartLineItem`'s
+    own `_resolve_price`, which does not use this helper.
     """
     if isinstance(value, dict):
         offer_price = value.get("offerPrice", value.get("offer_price"))
         return offer_price if offer_price is not None else value.get("mrp")
+    return value
+
+
+def _parse_currency_amount(value: Any) -> Any:
+    """Strip a leading rupee sign and thousands separators from a total.
+
+    `get_cart` renders totals as display strings (`"₹760"`), not bare
+    numbers - unlike a line's price, which is numeric. A plain scalar passes
+    through untouched.
+    """
+    if isinstance(value, str):
+        stripped = value.strip().lstrip("₹").replace(",", "").strip()
+        return stripped or None
     return value
 
 
@@ -207,10 +229,23 @@ class CartLineItem(BaseModel):
     quantity: int
     price: Decimal | None = None
 
-    @field_validator("price", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _flatten_price(cls, value: Any) -> Any:
-        return _flatten_price_value(value)
+    def _resolve_price(cls, data: Any) -> Any:
+        """`get_cart` has no `price` field at all.
+
+        Unlike `search_products`, a live cart line prices itself with flat
+        sibling fields - `mrp` and `discountedFinalPrice` - not a nested
+        `price` object. An earlier fix assumed the same nesting
+        `search_products` uses and flattened a field that was never there,
+        so every chat-composed line still priced at Rs 0.
+        `discountedFinalPrice` is what the user is actually charged; `mrp`
+        is the fallback when Swiggy omits it.
+        """
+        if not isinstance(data, dict) or data.get("price") is not None:
+            return data
+        price = data.get("discountedFinalPrice", data.get("mrp"))
+        return {**data, "price": price} if price is not None else data
 
     # Swiggy spells the line's name differently in different payloads -
     # `search_products` alone answers with `displayName` where the cart docs say
@@ -234,18 +269,27 @@ class Cart(BaseModel):
 
     Swiggy's docs confirm `availablePaymentMethods` and prose-describe "a
     pricing breakdown and totals" and "minimum order requirements"; the exact
-    keys for those aren't spelled out, so `total`/`minimum_order_value` parse
-    defensively and are optional.
+    keys for those aren't spelled out, so `minimum_order_value` parses
+    defensively and is optional. `total` is not a guess - it is a confirmed
+    live field, but it is called `cartTotalAmount` and rendered as a display
+    string (`"₹760"`), not the bare `total` this used to look for.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     items: list[CartLineItem] = Field(default_factory=list)
-    total: Decimal | None = None
+    total: Decimal | None = Field(
+        default=None, validation_alias=AliasChoices("cartTotalAmount", "total")
+    )
     minimum_order_value: Decimal | None = Field(default=None, alias="minimumOrderValue")
     available_payment_methods: list[str] = Field(
         default_factory=list, alias="availablePaymentMethods"
     )
+
+    @field_validator("total", mode="before")
+    @classmethod
+    def _parse_total(cls, value: Any) -> Any:
+        return _parse_currency_amount(value)
 
 
 class CheckoutResult(BaseModel):

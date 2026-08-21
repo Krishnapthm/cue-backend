@@ -18,3 +18,14 @@ DROPPED_BY_SWIGGY_REASON = (
     "Swiggy accepted the request but the item is not in the resulting cart; "
     "it is most likely out of stock or undeliverable to this address."
 )
+
+# Reason reported for a line that was already in the cart before this write,
+# and is absent afterwards, despite this write never asking for its removal.
+# Distinct from DROPPED_BY_SWIGGY_REASON (a *new* line Swiggy would not add):
+# this is Swiggy evicting an unrelated, previously-accepted line during a
+# merge write - most likely a cart size limit - and the client needs a
+# different message for a line the user did not just try to add.
+EVICTED_BY_SWIGGY_REASON = (
+    "Swiggy dropped this item from the cart while adding others; it is most "
+    "likely a cart size limit. Add it again if you still want it."
+)

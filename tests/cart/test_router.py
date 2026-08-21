@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.cart.constants import EVICTED_BY_SWIGGY_REASON
 from app.models.cart import CartPlan, CartPlanItem
 from app.models.provider import ProviderLink
 from app.models.tag import TagBinding
@@ -339,6 +340,30 @@ async def test_item_silently_dropped_by_swiggy_is_reported_as_rejected(
     assert body["added"] == [{"spinId": "spin-1", "quantity": 1}]
     assert [item["spinId"] for item in body["rejected"]] == ["spin-2"]
     assert spin_ids(body) == ["spin-1"]
+
+
+async def test_pre_existing_line_evicted_by_the_merge_write_is_reported(
+    authed_client: httpx.AsyncClient, fake_instamart: FakeInstamart
+) -> None:
+    """Swiggy can drop a line that was already in the cart and had nothing
+    to do with this write - observed live on a 17-line cart, where adding
+    one item silently dropped two unrelated ones. `spin-0` was never part of
+    this request; only the merge write (baseline + `spin-2`) could have
+    dropped it, and the old `_dropped` check only looked at what this call
+    itself requested, so a loss like this reached the client as full
+    success."""
+    fake_instamart.items = {"spin-0": 1, "spin-1": 2}
+    fake_instamart.drops = {"spin-0"}
+
+    response = await authed_client.post("/cart/items", json=add_body(("spin-2", 1)))
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["added"] == [{"spinId": "spin-2", "quantity": 1}]
+    assert body["rejected"] == [
+        {"spinId": "spin-0", "quantity": 1, "reason": EVICTED_BY_SWIGGY_REASON}
+    ]
+    assert spin_ids(body) == ["spin-1", "spin-2"]
 
 
 async def test_concurrent_adds_for_one_user_do_not_lose_lines(

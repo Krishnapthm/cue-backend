@@ -216,28 +216,75 @@ async def test_search_products_parses_the_real_shape_end_to_end(
     assert second.variants[1].rating is None
 
 
-def test_cart_line_item_flattens_a_nested_price_object() -> None:
-    """`get_cart` prices lines the same way `search_products` prices variants
-    (CUE-77's precedent) - a nested `{mrp, offerPrice}` object, not a bare
-    scalar. A cart line that doesn't flatten it parses with `price=None`,
-    which reads to the user as Rs 0 for every chat-composed item."""
+def test_cart_line_item_resolves_price_from_flat_siblings() -> None:
+    """A real linked-account `get_cart` capture has no `price` field at all -
+    a line prices itself with flat `mrp`/`discountedFinalPrice` siblings
+    instead, unlike `search_products`'s nested `{mrp, offerPrice}` object. A
+    cart line that doesn't resolve one from the other parses with
+    `price=None`, which reads to the user as Rs 0 for every chat-composed
+    item - `discountedFinalPrice` is what Swiggy actually charges."""
     line = {
         "spinId": "spin-1",
         "quantity": 2,
-        "price": {"mrp": 320, "offerPrice": 240},
+        "mrp": 90,
+        "discountedFinalPrice": 69,
     }
 
     cart = Cart.model_validate({"items": [line]})
 
-    assert cart.items[0].price == Decimal("240")
+    assert cart.items[0].price == Decimal("69")
 
 
-def test_cart_line_item_still_accepts_a_scalar_price() -> None:
+def test_cart_line_item_falls_back_to_mrp_with_no_discount() -> None:
+    line = {"spinId": "spin-1", "quantity": 1, "mrp": 34, "discountedFinalPrice": 34}
+
+    cart = Cart.model_validate({"items": [line]})
+
+    assert cart.items[0].price == Decimal("34")
+
+
+def test_cart_line_item_still_accepts_an_explicit_price_field() -> None:
+    """Not just a real capture's shape - an explicit `price` scalar, if
+    Swiggy ever sends one, is trusted over the flat siblings rather than
+    ignored."""
     cart = Cart.model_validate(
         {"items": [{"spinId": "spin-1", "quantity": 1, "price": "27.00"}]}
     )
 
     assert cart.items[0].price == Decimal("27.00")
+
+
+def test_cart_parses_a_real_get_cart_response() -> None:
+    """A trimmed copy of a real `get_cart` response logged against a live
+    linked account: flat per-line `mrp`/`discountedFinalPrice`, no nested
+    `price` object anywhere, and a display-string cart total keyed
+    `cartTotalAmount` rather than `total`."""
+    raw_cart = {
+        "cartTotalAmount": "₹760",
+        "items": [
+            {
+                "spinId": "SHZR8VDLRJ",
+                "itemName": "Daawat Pulav Basmati Rice",
+                "quantity": 1,
+                "mrp": 90,
+                "discountedFinalPrice": 69,
+            },
+            {
+                "spinId": "OPX8FP6RWK",
+                "itemName": "Coconut Chunks (Thengai Thundugal)",
+                "quantity": 2,
+                "mrp": 83,
+                "discountedFinalPrice": 63,
+            },
+        ],
+    }
+
+    cart = Cart.model_validate(raw_cart)
+
+    assert cart.total == Decimal("760")
+    assert cart.items[0].price == Decimal("69")
+    assert cart.items[0].product_name == "Daawat Pulav Basmati Rice"
+    assert cart.items[1].price == Decimal("63")
 
 
 def test_cart_line_items_preserve_optional_variant_metadata() -> None:

@@ -51,7 +51,11 @@ from decimal import Decimal
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cart.constants import DROPPED_BY_SWIGGY_REASON, MINIMUM_ORDER_VALUE
+from app.cart.constants import (
+    DROPPED_BY_SWIGGY_REASON,
+    EVICTED_BY_SWIGGY_REASON,
+    MINIMUM_ORDER_VALUE,
+)
 from app.cart.exceptions import CartItemNotFoundError
 from app.cart.schemas import (
     CartItemRequest,
@@ -269,6 +273,7 @@ async def compose_cart(
     async with _user_cart_lock(user_id):
         if purchasable:
             current = await instamart_service.get_cart(session, user_id)
+            baseline_ids = {line.spin_id for line in current.items}
             try:
                 cart = await instamart_service.update_cart(
                     session,
@@ -287,6 +292,22 @@ async def compose_cart(
                     exc.detail,
                 )
                 cart = await instamart_service.get_cart(session, user_id)
+            # This merge write can evict a line that was already in the cart
+            # and had nothing to do with this turn - observed live on a
+            # 17-line cart, where adding one item silently dropped two
+            # unrelated ones. `report_cart` already catches a dropped *new*
+            # selection by checking `cart.items` directly; a dropped
+            # pre-existing line has no representation in this turn's matches
+            # at all, so it can only be caught here, against the baseline.
+            evicted = baseline_ids - {line.spin_id for line in cart.items}
+            if evicted:
+                logger.warning(
+                    "compose_cart for session %s evicted %d pre-existing "
+                    "line(s) it never touched: %s",
+                    chat_session_id,
+                    len(evicted),
+                    sorted(evicted),
+                )
         else:
             cart = await instamart_service.get_cart(session, user_id)
 
@@ -391,21 +412,31 @@ def _merge(
 
 
 def _dropped(
-    cart: Cart, requested: Iterable[CartItemRequest], already_rejected: set[str]
+    cart: Cart,
+    requested: Iterable[CartItemRequest | CartItemInput],
+    already_rejected: set[str],
+    *,
+    reason: str = DROPPED_BY_SWIGGY_REASON,
 ) -> list[RejectedCartItem]:
     """Report requested lines missing from the cart Swiggy read back.
 
     Swiggy does not always fail a write it cannot fully honour: it can
     answer `success: true` and quietly omit an out-of-stock or undeliverable
-    line. Diffing the read-back against what we asked for is the only way to
-    catch that, and it costs no extra call.
+    line - or, on a merge write, quietly drop a line that was already in the
+    cart and was never part of this write's request at all (observed on a
+    17-line cart: adding one new item came back with two unrelated existing
+    lines gone). Diffing the read-back against everything the write was
+    supposed to leave in the cart - not just what this call added - is the
+    only way to catch either case, and it costs no extra call. `reason`
+    distinguishes the two for the caller: `requested` here can be this
+    call's own additions or the pre-existing baseline it merged onto.
     """
     present = {line.spin_id for line in cart.items}
     return [
         RejectedCartItem(
             spin_id=item.spin_id,
             quantity=item.quantity,
-            reason=DROPPED_BY_SWIGGY_REASON,
+            reason=reason,
         )
         for item in requested
         if item.spin_id not in present and item.spin_id not in already_rejected
@@ -537,6 +568,16 @@ async def add_items(
             )
 
         rejected += _dropped(cart, items, {item.spin_id for item in rejected})
+        # The write above submitted `baseline` too (merged into the same
+        # `update_cart` call) - a pre-existing line missing from the
+        # read-back was evicted by this write just as surely as a rejected
+        # new one, and was invisible before this check existed.
+        rejected += _dropped(
+            cart,
+            baseline,
+            {item.spin_id for item in rejected},
+            reason=EVICTED_BY_SWIGGY_REASON,
+        )
         rejected_ids = {item.spin_id for item in rejected}
         added = [item for item in items if item.spin_id not in rejected_ids]
         return CartMutationResult(
