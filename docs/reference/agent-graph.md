@@ -38,6 +38,10 @@ START -> route_turn --(recipe)--------------> generate_recipe
              |                                       report_cart -> END
              +-------(order_status)-> order_status ------> END
              |
+             +--(cooking_question)-> answer_cooking_question -> END
+             |
+             +-------(small_talk)---> small_talk --------> END
+             |
              +-------(out_of_scope)-> refuse ------------> END
 ```
 
@@ -49,7 +53,7 @@ declares its destinations through its `Command[...]` return annotation.
 
 | Node | Model role | Purpose |
 |---|---|---|
-| `route_turn` | `ROUTER` | Classify the turn into one of four intents, and route it |
+| `route_turn` | `ROUTER` | Classify the turn into one of six intents, and route it |
 | `generate_recipe` | `RECIPE` | Produce a structured recipe for the named dish |
 | `parse_recipe_photo` | `VISION` | Read an uploaded photo into the same recipe schema |
 | `schedule_title` | `TITLE` | Start one best-effort attempt to name the session |
@@ -61,6 +65,8 @@ declares its destinations through its `Command[...]` return annotation.
 | `compose_cart` | none | Record the plan, and push it to the Swiggy cart |
 | `report_cart` | none | Render the closing card from the cart Swiggy holds |
 | `order_status` | `ORDER_STATUS` | Answer "where is my order" from the real order list |
+| `answer_cooking_question` | `COOKING` | Answer a question about the step the user is on |
+| `small_talk` | `SMALL_TALK` | Answer a thank-you or a greeting in one short line |
 | `refuse` | none | Append a fixed refusal message. No model runs |
 
 `app/agent/config.py` maps each role to a model id. See the
@@ -68,14 +74,25 @@ declares its destinations through its `Command[...]` return annotation.
 
 ### Intents and destinations
 
-`route_turn` returns one of four intents:
+`route_turn` returns one of six intents:
 
 | Intent | Destination |
 |---|---|
 | `recipe` | `generate_recipe` |
 | `photo` | `parse_recipe_photo` |
 | `order_status` | `order_status` |
+| `cooking_question` | `answer_cooking_question` |
+| `small_talk` | `small_talk` |
 | `out_of_scope` | `refuse` |
+
+`cooking_question` is offered to the classifier only on a turn that carries an
+`active_step_index` *and* whose session already holds a recipe. On any other
+turn the label is not described in the prompt, and a model that returns it
+anyway fails closed to `refuse`.
+
+`small_talk` takes the pleasantries - thanks, praise, greetings - that would
+otherwise fall into `out_of_scope` and be answered with the refusal. It writes
+nothing but `messages`, and its reply is capped at one short line.
 
 The classifier receives the user's turn between delimiters, and the prompt
 states that everything inside is data to judge, never instructions to follow.

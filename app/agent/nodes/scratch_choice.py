@@ -40,15 +40,30 @@ def _is_purchasable(component: ScratchComponent, products: list[Product]) -> boo
 
 
 def _candidate_components(recipe: GeneratedRecipe) -> list[ScratchComponent]:
-    """Return valid decomposition points, most significant first."""
+    """Return valid decomposition points, most significant first.
+
+    A component the user already has is not a decomposition point: asking
+    "ready-made idli batter, or make it from scratch?" of someone who opened
+    with "I already have idli batter" is the agent not listening. The prompt
+    asks the model not to emit one in that case; this is the floor under it,
+    and it reads the same `user_supplied` flag the checklist does.
+    """
     ingredient_names = {
         normalize_name(ingredient.name) for ingredient in recipe.ingredients
+    }
+    supplied = {
+        normalize_name(ingredient.name)
+        for ingredient in recipe.ingredients
+        if ingredient.user_supplied
     }
     candidates = [
         component
         for component in recipe.scratch_components
         if len(set(map(normalize_name, component.constituent_names))) >= 2
         and set(map(normalize_name, component.constituent_names)) <= ingredient_names
+        and normalize_name(component.ready_made_name) not in supplied
+        and normalize_name(component.name) not in supplied
+        and not (set(map(normalize_name, component.constituent_names)) & supplied)
     ]
     return sorted(
         candidates,

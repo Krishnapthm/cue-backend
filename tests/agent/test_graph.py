@@ -238,6 +238,7 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
         "parse_recipe_photo",
         "order_status",
         "answer_cooking_question",
+        "small_talk",
         "normalize_ingredients",
         "find_scratch_component",
         "choose_scratch_component",
@@ -245,7 +246,12 @@ def test_graph_has_every_branch_the_router_can_reach() -> None:
     } <= set(drawable.nodes)
     edges = {(e.source, e.target) for e in drawable.edges}
     assert ("__start__", "route_turn") in edges
-    for branch in ("order_status", "answer_cooking_question", "refuse"):
+    for branch in (
+        "order_status",
+        "answer_cooking_question",
+        "small_talk",
+        "refuse",
+    ):
         assert (branch, "__end__") in edges
     # The photo path converges on the text path instead of ending on its own.
     assert ("parse_recipe_photo", "generate_recipe") in edges

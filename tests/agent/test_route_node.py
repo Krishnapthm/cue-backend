@@ -1,4 +1,4 @@
-"""`route_turn`: the five intents, the branch each takes, and failing closed.
+"""`route_turn`: the six intents, the branch each takes, and failing closed.
 
 These are unit tests - no real model is called. `get_chat_model` is
 monkeypatched to a fake `BaseChatModel`-shaped object, mirroring
@@ -151,7 +151,7 @@ def _classified(intent: TurnIntent, reason: str = "because") -> TurnClassificati
     return TurnClassification(intent=intent, reason=reason)
 
 
-# --- the four intents ------------------------------------------------------
+# --- the six intents -------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -217,6 +217,36 @@ async def test_out_of_scope_turns_route_to_refuse(
     update = command.update or {}
     assert update["turn_intent"] is TurnIntent.OUT_OF_SCOPE
     assert update["guardrail"].verdict is ScopeVerdict.OUT_OF_SCOPE
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "wow thank you, that dish turned out so good",
+        "hey!",
+        "goodnight, talk tomorrow",
+    ],
+    ids=["compliment", "greeting", "sign-off"],
+)
+async def test_pleasantries_route_to_small_talk_and_count_as_in_scope(
+    monkeypatch: pytest.MonkeyPatch, message: str
+) -> None:
+    # These used to land on `refuse`, which answered a compliment by listing
+    # what Cue can and cannot do. They are in scope: welcome, just not work.
+    _stub(monkeypatch, [_classified(TurnIntent.SMALL_TALK)])
+
+    command = await route_turn(_state(message), _runtime())
+
+    assert command.goto == "small_talk"
+    update = command.update or {}
+    assert update["turn_intent"] is TurnIntent.SMALL_TALK
+    assert update["guardrail"].verdict is ScopeVerdict.IN_SCOPE
+
+
+def test_the_router_prompt_offers_the_small_talk_intent() -> None:
+    # The label has to be described in the prompt or the model can never
+    # choose it, which is the state that produced the refusal-to-a-thank-you.
+    assert "`small_talk`" in route_module._SYSTEM_PROMPT
 
 
 async def test_a_turn_with_a_photo_routes_to_the_photo_path(

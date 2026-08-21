@@ -107,6 +107,32 @@ async def test_does_not_offer_an_unpurchasable_or_wrong_ready_item(
     }
 
 
+async def test_does_not_offer_a_choice_about_something_the_user_already_has(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # "I already have dosa batter" - asking "ready-made, or from scratch?" is
+    # the agent not listening, so the card never appears even though the
+    # ready-made item is in stock.
+    async def _search(*_args: object, **_kwargs: object) -> list[Product]:
+        return [_product()]
+
+    monkeypatch.setattr(instamart_service, "search_products", _search)
+
+    recipe = _recipe()
+    recipe = recipe.model_copy(
+        update={
+            "ingredients": [
+                *recipe.ingredients,
+                RecipeIngredient(name="dosa batter", user_supplied=True),
+            ]
+        }
+    )
+
+    assert (await node.find_scratch_component(_state(recipe), _runtime())) == {
+        "scratch_component": None
+    }
+
+
 def test_scratch_choice_payload_has_a_discriminated_ui_variant() -> None:
     recipe = _recipe()
     state = _state(recipe)

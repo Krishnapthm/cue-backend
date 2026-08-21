@@ -11,11 +11,29 @@ from app.instamart.schemas import ProductRating
 
 
 class RecipeIngredient(BaseModel):
-    """A single ingredient line within a generated recipe."""
+    """A single ingredient line within a generated recipe.
+
+    `pantry_staple` and `user_supplied` are the two reasons an ingredient is
+    real but must not be put in front of the user as something to tick. Both
+    are decided by the recipe model, not by a keyword list here, because the
+    judgement is dish- and cuisine-specific: dried red chillies are a
+    background seasoning in a tempering and the headline ingredient of a
+    chilli paste, and no list of names can tell those apart.
+    `normalize_ingredients` is what acts on them; the recipe card still shows
+    every line, flagged or not, so nothing disappears from the recipe itself.
+
+    `pantry_staple` means an everyday seasoning nobody shops for per dish
+    (salt, water, turmeric, a pinch of chilli powder). `user_supplied` means
+    *this user, on this turn*, said they already have it ("I already have idli
+    batter") - a fact about the conversation rather than about the dish, so it
+    is never inferred, only read off what they actually wrote.
+    """
 
     name: str
     quantity: float | None = None
     unit: str | None = None
+    pantry_staple: bool = False
+    user_supplied: bool = False
 
 
 class ScratchComponent(BaseModel):
@@ -147,6 +165,13 @@ class TurnIntent(StrEnum):
     enough?" is classified `RECIPE`, which regenerates the recipe, re-asks the
     checklist and recomposes the cart - wiping the cooking session the user is
     standing in front of.
+
+    `SMALL_TALK` exists for the same shape of reason. "Thanks, that turned out
+    so good" is not a recipe request and not an attack, but with only
+    `OUT_OF_SCOPE` to fall into it was answered with a refusal explaining what
+    Cue can and cannot do - a paragraph of scope policy in reply to a
+    compliment. Being out of scope for *work* is not the same as being
+    unwelcome, and the two need different replies.
     """
 
     OUT_OF_SCOPE = "out_of_scope"
@@ -154,6 +179,7 @@ class TurnIntent(StrEnum):
     PHOTO = "photo"
     ORDER_STATUS = "order_status"
     COOKING_QUESTION = "cooking_question"
+    SMALL_TALK = "small_talk"
 
 
 class TurnClassification(BaseModel):

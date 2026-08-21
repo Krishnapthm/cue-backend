@@ -14,16 +14,21 @@ from typing import Any
 from langgraph.runtime import Runtime
 
 from app.agent.context import CueContext
-from app.agent.schemas import IngredientStatus, NormalizedIngredient
+from app.agent.schemas import IngredientStatus, NormalizedIngredient, RecipeIngredient
 from app.agent.state import AgentState
 from app.pantry import service as pantry_service
 from app.pantry.service import normalize_name
 
 logger = logging.getLogger(__name__)
 
-#: Ingredients omitted from every checklist because they are universally present.
-#: Keep this deliberately narrow: omitting an ingredient a user needs to buy is
-#: worse than leaving an extra row for them to confirm.
+#: Ingredients omitted from every checklist because they are universally
+#: present, matched by name as a floor under the recipe model's own
+#: `pantry_staple` judgement. It stays deliberately narrow - two things nobody
+#: has ever added to a grocery order - because a name list cannot see what role
+#: an ingredient plays in a dish, and omitting something the user needs to buy
+#: is worse than leaving an extra row for them to confirm. Everything else
+#: (turmeric, chilli powder, cumin) is the model's call per recipe; see
+#: `RecipeIngredient.pantry_staple`.
 ASSUMED_STAPLES = frozenset({"salt", "water"})
 
 #: A bulk mass amount is an explicit exception to `ASSUMED_STAPLES`. A recipe
@@ -48,11 +53,35 @@ def _is_bulk_staple(quantity: float | None, unit: str | None) -> bool:
     )
 
 
-def _is_assumed_staple(name: str, quantity: float | None, unit: str | None) -> bool:
-    """Return whether an ingredient can safely be omitted from a checklist."""
-    return normalize_name(name) in ASSUMED_STAPLES and not _is_bulk_staple(
-        quantity, unit
+def _is_assumed_staple(ingredient: RecipeIngredient) -> bool:
+    """Return whether an ingredient is a staple the checklist should not ask about.
+
+    Two sources, one bulk exception over both. The name list is the floor;
+    `pantry_staple` is the recipe model's per-dish judgement, which is what
+    catches the seasonings a fixed list never could - "red chillies" in a
+    tempering - without also swallowing them where they are the dish itself.
+    The bulk exception applies to either source for the reason it always did:
+    an amount that large is not a pinch out of the cupboard.
+    """
+    named = normalize_name(ingredient.name) in ASSUMED_STAPLES
+    return (named or ingredient.pantry_staple) and not _is_bulk_staple(
+        ingredient.quantity, ingredient.unit
     )
+
+
+def _is_omitted(ingredient: RecipeIngredient) -> bool:
+    """Return whether an ingredient is kept out of the checklist entirely.
+
+    An omitted row is never shown, never ticked and never bought: it does not
+    reach `normalized_ingredients`, which is what `fan_out` reads. The recipe
+    itself is untouched - `render_recipe` prints every line - so a dish that
+    needs salt still says so on the card.
+
+    `user_supplied` is honoured without the bulk exception that guards the
+    staples. The user said they have it; how much the recipe calls for is not
+    evidence against what they told us.
+    """
+    return ingredient.user_supplied or _is_assumed_staple(ingredient)
 
 
 async def _seed_have_marks(
@@ -96,10 +125,12 @@ async def normalize_ingredients_node(
     Deterministic, not model-driven: maps `state["recipe"].ingredients` (from
     either intake path - CUE-22 dish-name generation or CUE-23 photo parse,
     both produce a `GeneratedRecipe`) plus the have-list checkbox state in
-    `state["have_marks"]` into `list[NormalizedIngredient]`. Ingredients in
-    `ASSUMED_STAPLES` are removed before any checklist or cart path sees them,
-    except for explicitly bulk mass quantities. Every remaining source
-    ingredient produces a row -
+    `state["have_marks"]` into `list[NormalizedIngredient]`. Staples and
+    anything the user said they already have are removed before any checklist
+    or cart path sees them - by name for `ASSUMED_STAPLES`, and by the recipe
+    model's own `pantry_staple`/`user_supplied` flags for everything else, with
+    the bulk-mass exception over the staple half. See `_is_omitted`. Every
+    remaining source ingredient produces a row -
     `HAVE` rows are kept for display, and only `NEED` rows are later handed
     to matching (the caller filters on `status`, not this node).
 
@@ -168,9 +199,7 @@ async def normalize_ingredients_node(
         )
 
     recipe_ingredients = [
-        ingredient
-        for ingredient in recipe.ingredients
-        if not _is_assumed_staple(ingredient.name, ingredient.quantity, ingredient.unit)
+        ingredient for ingredient in recipe.ingredients if not _is_omitted(ingredient)
     ]
 
     have_marks = state.get("have_marks") or set()
