@@ -52,6 +52,7 @@ def spin_ids(payload: dict[str, object]) -> list[str]:
         ("post", "/cart/items", add_body(("spin-1", 1))),
         ("patch", "/cart/items/spin-1", {"addressId": ADDRESS_ID, "quantity": 2}),
         ("delete", f"/cart/items/spin-1?addressId={ADDRESS_ID}", None),
+        ("delete", f"/cart?addressId={ADDRESS_ID}", None),
     ],
 )
 async def test_routes_require_authentication(
@@ -486,5 +487,52 @@ async def test_delete_requires_an_address_id(
     authed_client: httpx.AsyncClient, fake_instamart: FakeInstamart
 ) -> None:
     response = await authed_client.delete("/cart/items/spin-1")
+
+    assert response.status_code == 422
+
+
+# --------------------------------------------------------------------------
+# DELETE /cart
+# --------------------------------------------------------------------------
+
+
+async def test_clear_removes_every_line(
+    authed_client: httpx.AsyncClient, fake_instamart: FakeInstamart
+) -> None:
+    fake_instamart.items = {"spin-1": 1, "spin-2": 2}
+
+    response = await authed_client.delete(f"/cart?addressId={ADDRESS_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["cart"]["items"] == []
+    assert fake_instamart.items == {}
+
+
+async def test_clear_does_not_read_the_cart_first(
+    authed_client: httpx.AsyncClient, fake_instamart: FakeInstamart
+) -> None:
+    """Unlike every other mutating route, clearing never merges - it is the
+    one write allowed to discard everything, so there is nothing to read
+    first."""
+    fake_instamart.items = {"spin-1": 1}
+
+    await authed_client.delete(f"/cart?addressId={ADDRESS_ID}")
+
+    assert fake_instamart.writes == [[]]
+
+
+async def test_clear_of_an_already_empty_cart_is_a_no_op(
+    authed_client: httpx.AsyncClient, fake_instamart: FakeInstamart
+) -> None:
+    response = await authed_client.delete(f"/cart?addressId={ADDRESS_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["cart"]["items"] == []
+
+
+async def test_clear_requires_an_address_id(
+    authed_client: httpx.AsyncClient, fake_instamart: FakeInstamart
+) -> None:
+    response = await authed_client.delete("/cart")
 
     assert response.status_code == 422

@@ -150,3 +150,25 @@ async def delete_cart_item(
     return await service.remove_item(
         session, user.id, address_id=address_id, spin_id=spin_id
     )
+
+
+@router.delete(
+    "",
+    response_model=CartMutationResult,
+    status_code=status.HTTP_200_OK,
+    summary="Remove every line from the cart",
+    responses={**_SWIGGY_ERRORS},
+)
+async def delete_cart(
+    user: CurrentUser,
+    session: DbSession,
+    address_id: Annotated[str, _ADDRESS_ID_QUERY],
+) -> CartMutationResult:
+    """Clear the whole cart and return the (empty) resulting cart.
+
+    Instamart has no dedicated clear-cart tool; this writes `update_cart`
+    with an empty item list, which is how its replace semantics express an
+    emptied cart. Unlike the other mutating routes, this is deliberately not
+    a merge - clearing is the one operation meant to discard everything.
+    """
+    return await service.clear_cart(session, user.id, address_id=address_id)

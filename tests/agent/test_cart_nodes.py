@@ -255,7 +255,16 @@ async def test_an_unavailable_row_is_planned_but_never_sent_to_swiggy(
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
     """It is the match-rate denominator, not a cart line."""
-    mock_instamart_tool_call.configure(result={"structuredContent": CART_WITH_BOTH})
+    # An empty current cart, distinct from the post-write CART_WITH_BOTH
+    # response: otherwise the leading get_cart (read to merge onto) would
+    # itself answer with spin-2 already present, and the assertion below
+    # couldn't tell "sent by this compose" from "already in the baseline".
+    mock_instamart_tool_call.configure_tool_result(
+        "get_cart", {"structuredContent": {"items": []}}
+    )
+    mock_instamart_tool_call.configure_tool_result(
+        "update_cart", {"structuredContent": CART_WITH_BOTH}
+    )
     matches = [
         _match(),
         _match(
@@ -290,14 +299,23 @@ async def test_an_unavailable_row_is_planned_but_never_sent_to_swiggy(
     assert [item["spinId"] for item in sent["items"]] == ["spin-1"]
 
 
-async def test_below_the_minimum_the_plan_is_kept_and_nothing_is_pushed(
+async def test_below_the_minimum_still_writes_and_reports_the_shortfall(
     db_session: AsyncSession,
     linked_user: User,
     chat_session: ChatSession,
     mock_instamart_tool_call: InstamartToolCallStub,
 ) -> None:
-    """There is nothing checkout-able yet, so the user's real cart is untouched."""
-    mock_instamart_tool_call.configure(result={"structuredContent": CART_WITH_BOTH})
+    """The Rs 99 minimum (R5.4) no longer gates the write - only the report.
+
+    A merge can clear the minimum on the strength of what the cart already
+    held even when this turn's own addition alone would not, so compose
+    always pushes what it has; `below_minimum`/`shortfall` are computed from
+    the real post-write cart.
+    """
+    below_minimum_cart = {
+        "items": [{"spinId": "spin-1", "quantity": 1, "price": "10.00"}]
+    }
+    mock_instamart_tool_call.configure(result={"structuredContent": below_minimum_cart})
     cheap = _match(quantity=1, unit_price="10.00")
 
     update = await compose_cart_node(
@@ -308,7 +326,7 @@ async def test_below_the_minimum_the_plan_is_kept_and_nothing_is_pushed(
     assert result.below_minimum is True
     assert result.shortfall == Decimal("89.00")
     assert await db_session.get(CartPlan, update["cart_plan_id"]) is not None
-    assert mock_instamart_tool_call.tool_calls(TOOL_UPDATE_CART) == []
+    assert mock_instamart_tool_call.tool_calls(TOOL_UPDATE_CART) != []
 
 
 # --- report_cart ------------------------------------------------------------

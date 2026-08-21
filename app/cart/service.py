@@ -17,15 +17,22 @@ exception - an unresolved ingredient is a normal outcome `compose_cart` must
 handle, not an error.
 
 `compose_cart` takes the selections for every ingredient in a session and
-writes them as a single `CartPlan` (R5.1), enforcing the Rs 99 minimum
-(R5.4) and the address-bound-plan invariant (R3.3).
+writes them as a single `CartPlan` (R5.1) and the address-bound-plan
+invariant (R3.3). It merges those selections onto whatever the Swiggy cart
+already holds rather than replacing it, using the same read-merge-write
+primitives as the cart API below, so items added from the pantry screen (or
+an earlier chat session) survive a chat recompose. Compose only ever adds or
+increases a line - it never removes one; the Rs 99 minimum (R5.4) is
+reporting only; see the function docstring for both.
 
-`get_cart` / `add_items` / `set_item_quantity` / `remove_item` back the cart
-API (CUE-80). Swiggy's `update_cart` *replaces* the cart, so every one of
-them is a read-merge-write against the current server cart - written once,
-here, so the three mutating routes cannot each invent their own version of
-it. See `_user_cart_lock` for the concurrency guarantee, which is
-deliberately per-process only.
+`get_cart` / `add_items` / `set_item_quantity` / `remove_item` / `clear_cart`
+back the cart API (CUE-80). Swiggy's `update_cart` *replaces* the cart, so
+every one of them but `clear_cart` is a read-merge-write against the current
+server cart - written once, here, so the four mutating routes cannot each
+invent their own version of it. `clear_cart` is the one exception: it
+discards the cart on purpose, so there is nothing to merge onto. See
+`_user_cart_lock` for the concurrency guarantee, which is deliberately
+per-process only.
 """
 
 from __future__ import annotations
@@ -203,19 +210,25 @@ async def compose_cart(
     address_id: str,
     selected_variants: list[SelectedVariant],
 ) -> ComposeCartResult:
-    """Compose the full cart for `chat_session_id` in one write (R5.1).
+    """Compose this turn's selections into the cart in one write (R5.1).
 
-    Always supersedes any existing live plan for this session first (R3.3):
+    Always supersedes any existing live *plan* for this session first (R3.3):
     a recompose - whether from a fresh selection or a switched delivery
-    address - replaces the plan; `CartPlan` is append-only, never mutated in
-    place, so the superseded history stays debuggable. Because the caller
-    always passes the full, freshly-sourced set of `selected_variants`, an
-    address switch can never carry stale items forward - there is no
-    "reuse previous items" path.
+    address - replaces the plan bookkeeping row; `CartPlan` is append-only,
+    never mutated in place, so the superseded history stays debuggable. This
+    never touches the Swiggy cart itself: `selected_variants` is merged onto
+    whatever the server cart already holds, under the same lock and `_merge`
+    that `add_items` uses (CUE-80), so a chat recompose can never drop a line
+    added from the pantry screen or an earlier session. Compose only ever
+    adds or increases a line; removing one is always an explicit user action
+    (`remove_item`, `clear_cart`), never something a recompose decides.
 
-    Below the Rs 99 minimum (R5.4), the plan is still recorded, but
-    `update_cart` is never called: there's nothing checkout-able yet, and
-    the result's `shortfall` guides the user to add more before recomposing.
+    The Rs 99 minimum (R5.4) no longer gates the write - a merge can
+    legitimately clear it on the strength of what the cart already held, even
+    when this turn's own addition alone would not. `update_cart` is skipped
+    only when this turn has nothing purchasable to add; `below_minimum` and
+    `shortfall` are computed from the real post-write cart and are reporting
+    only, guiding the user to add more before checkout.
     """
     await _supersede_live_plan(session, chat_session_id)
 
@@ -241,54 +254,52 @@ async def compose_cart(
         )
     await session.commit()
 
-    purchasable: list[tuple[str, int, Decimal]] = []
-    for variant in selected_variants:
+    purchasable = [
+        CartItemRequest(spin_id=variant.spin_id, quantity=variant.quantity)
+        for variant in selected_variants
         if (
-            variant.spin_id is None
-            or variant.quantity is None
-            or variant.unit_price is None
-        ):
-            continue
-        purchasable.append((variant.spin_id, variant.quantity, variant.unit_price))
+            variant.spin_id is not None
+            and variant.quantity is not None
+            and variant.unit_price is not None
+        )
+    ]
+
+    async with _user_cart_lock(user_id):
+        if purchasable:
+            current = await instamart_service.get_cart(session, user_id)
+            try:
+                cart = await instamart_service.update_cart(
+                    session,
+                    user_id,
+                    address_id=address_id,
+                    items=_merge(_as_inputs(current.items), purchasable),
+                )
+            except InstamartCartReviewRequiredError as exc:
+                # The write succeeded with stock-adjusted quantities. The cart
+                # read below is the source of truth the report renders, and
+                # the graph ends at that report - never checkout - so the
+                # user can review it first.
+                logger.info(
+                    "Instamart adjusted cart quantities for session %s: %s",
+                    chat_session_id,
+                    exc.detail,
+                )
+                cart = await instamart_service.get_cart(session, user_id)
+        else:
+            cart = await instamart_service.get_cart(session, user_id)
 
     subtotal = sum(
-        (unit_price * quantity for _, quantity, unit_price in purchasable),
+        (line.price * line.quantity for line in cart.items if line.price is not None),
         start=Decimal(0),
     )
-    if subtotal < MINIMUM_ORDER_VALUE:
-        return ComposeCartResult(
-            plan_id=plan.id,
-            subtotal=subtotal,
-            minimum_order_value=MINIMUM_ORDER_VALUE,
-            below_minimum=True,
-            shortfall=MINIMUM_ORDER_VALUE - subtotal,
-        )
-
-    items = [
-        CartItemInput(spin_id=spin_id, quantity=quantity)
-        for spin_id, quantity, _ in purchasable
-    ]
-    try:
-        await instamart_service.update_cart(
-            session, user_id, address_id=address_id, items=items
-        )
-    except InstamartCartReviewRequiredError as exc:
-        # The write succeeded with stock-adjusted quantities. The cart read
-        # below is the source of truth the report renders, and the graph ends
-        # at that report - never checkout - so the user can review it first.
-        logger.info(
-            "Instamart adjusted cart quantities for session %s: %s",
-            chat_session_id,
-            exc.detail,
-        )
-    cart = await instamart_service.get_cart(session, user_id)
+    below_minimum = subtotal < MINIMUM_ORDER_VALUE
 
     return ComposeCartResult(
         plan_id=plan.id,
         subtotal=subtotal,
         minimum_order_value=MINIMUM_ORDER_VALUE,
-        below_minimum=False,
-        shortfall=Decimal(0),
+        below_minimum=below_minimum,
+        shortfall=max(MINIMUM_ORDER_VALUE - subtotal, Decimal(0)),
         cart=cart,
     )
 
@@ -655,5 +666,28 @@ async def remove_item(
         )
         cart = await instamart_service.update_cart(
             session, user_id, address_id=address_id, items=remaining
+        )
+        return CartMutationResult(cart=await _named(session, user_id, cart))
+
+
+async def clear_cart(
+    session: AsyncSession, user_id: int, *, address_id: str
+) -> CartMutationResult:
+    """Remove every line from the cart in one write.
+
+    Unlike `add_items`/`set_item_quantity`/`remove_item`, this never reads
+    the current cart first: clearing is the one mutation meant to discard
+    everything, so there is nothing to merge onto. Instamart has no dedicated
+    clear/empty-cart tool - `update_cart`'s replace semantics mean an empty
+    item list *is* how an emptied cart is expressed, exactly as the last line
+    of `remove_item` already relies on.
+
+    Raises:
+        InstamartAuthError: The Swiggy link is missing or expired (401).
+        InstamartTransportError: Swiggy was unreachable (502).
+    """
+    async with _user_cart_lock(user_id):
+        cart = await instamart_service.update_cart(
+            session, user_id, address_id=address_id, items=[]
         )
         return CartMutationResult(cart=await _named(session, user_id, cart))
